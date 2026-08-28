@@ -1,0 +1,1 @@
+{"name":"@fda/db","version":"0.1.0","private":true,"type":"module","exports":"./src/index.ts","dependencies":{"@fda/contracts":"workspace:*","@fda/domain":"workspace:*","@fda/fixtures":"workspace:*","@fda/recommendation":"workspace:*","better-sqlite3":"12.4.1","kysely":"0.28.8"},"devDependencies":{"@types/better-sqlite3":"7.6.13"}}

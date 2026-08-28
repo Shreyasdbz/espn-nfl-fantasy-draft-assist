@@ -1,0 +1,26 @@
+{
+  "name": "@fda/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@fda/adapter-sdk": "workspace:*",
+    "@fda/contracts": "workspace:*",
+    "@fda/db": "workspace:*",
+    "@fda/domain": "workspace:*",
+    "@fda/espn-adapter": "workspace:*",
+    "@fda/recommendation": "workspace:*",
+    "@fda/simulator": "workspace:*",
+    "fastify": "5.6.2",
+    "playwright": "1.55.1",
+    "zod": "4.1.11"
+  },
+  "devDependencies": {
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}

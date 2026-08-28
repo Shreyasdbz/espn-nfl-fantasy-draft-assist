@@ -1,0 +1,1 @@
+{"name":"@fda/espn-adapter","version":"0.1.0","private":true,"type":"module","exports":"./src/index.ts","dependencies":{"@fda/adapter-sdk":"workspace:*","@fda/contracts":"workspace:*","playwright":"1.55.1","zod":"4.1.11"}}

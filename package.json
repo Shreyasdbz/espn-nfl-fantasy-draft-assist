@@ -1,0 +1,34 @@
+{
+  "name": "fantasy-draft-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.25.0",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "tsx apps/cli/src/index.ts start",
+    "dev:web": "pnpm --filter @fda/web dev",
+    "dev:engine": "pnpm --filter @fda/engine dev",
+    "build": "pnpm --filter @fda/web build",
+    "typecheck": "tsc --noEmit",
+    "lint": "pnpm --filter @fda/web lint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:replay": "vitest run tests/replay",
+    "verify": "pnpm typecheck && pnpm test && pnpm lint && pnpm build",
+    "app:doctor": "tsx apps/cli/src/index.ts doctor",
+    "app:backup": "tsx apps/cli/src/index.ts backup",
+    "app:stop": "tsx apps/cli/src/index.ts stop"
+  },
+  "devDependencies": {
+    "@fda/db": "workspace:*",
+    "@fda/espn-adapter": "workspace:*",
+    "@fda/fixtures": "workspace:*",
+    "@types/node": "22.19.19",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
+  }
+}

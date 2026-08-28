@@ -1,0 +1,17 @@
+node_modules/
+.pnpm-store/
+.next/
+dist/
+coverage/
+*.log
+.DS_Store
+.env
+.env.local
+.runtime/
+.data/
+.wrangler/
+app.sqlite*
+chrome-profile/
+evidence/
+backups/
+diagnostics/
