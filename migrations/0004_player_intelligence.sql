@@ -1,0 +1,35 @@
+CREATE TABLE IF NOT EXISTS player_intelligence (
+  player_id TEXT PRIMARY KEY REFERENCES players(id),
+  profile_version TEXT NOT NULL,
+  sample_season INTEGER NOT NULL,
+  games INTEGER NOT NULL CHECK (games >= 0),
+  age REAL,
+  roster_status TEXT,
+  prior_team TEXT,
+  current_team TEXT,
+  fantasy_points_ppr REAL,
+  fantasy_ppg_ppr REAL,
+  late_season_ppg_ppr REAL,
+  carries INTEGER,
+  targets INTEGER,
+  receptions INTEGER,
+  scrimmage_yards INTEGER,
+  total_touchdowns INTEGER,
+  opportunities_per_game REAL,
+  target_share REAL,
+  air_yards_share REAL,
+  trend_score REAL,
+  floor_score REAL NOT NULL CHECK (floor_score BETWEEN 0 AND 100),
+  ceiling_score REAL NOT NULL CHECK (ceiling_score BETWEEN 0 AND 100),
+  role_summary TEXT NOT NULL,
+  floor_case TEXT NOT NULL,
+  ceiling_case TEXT NOT NULL,
+  risk_note TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  source_count INTEGER NOT NULL CHECK (source_count >= 1),
+  data_quality TEXT NOT NULL CHECK (data_quality IN ('strong', 'partial', 'context-only')),
+  researched_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS player_intelligence_quality
+  ON player_intelligence(data_quality, sample_season, player_id);

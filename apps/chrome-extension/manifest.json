@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Fourth Down ESPN Watcher",
+  "version": "0.1.0",
+  "description": "Passively mirrors rendered ESPN fantasy draft picks into the local Fourth Down engine.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://fantasy.espn.com/*",
+    "http://127.0.0.1:4317/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://fantasy.espn.com/football/draft*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Fourth Down ESPN Watcher"
+  }
+}

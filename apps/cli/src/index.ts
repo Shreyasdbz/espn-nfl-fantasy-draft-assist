@@ -1,8 +1,10 @@
 import { randomBytes } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { DraftRepository, defaultDataDirectory } from '@fda/db';
+import { readResearchWorkbook } from './research-workbook.ts';
+import { readPlayerIntelligence } from './player-intelligence.ts';
 
 const command = process.argv[2] ?? 'start';
 const dataDirectory = defaultDataDirectory();
@@ -46,6 +48,85 @@ function backup() {
   const result = repository.backup(join(dataDirectory, 'backups', `${stamp}.sqlite`)); repository.close(); console.log(JSON.stringify(result, null, 2));
 }
 
+function repairRuntime() {
+  const descriptor = readDescriptor();
+  if (descriptor && processAlive(descriptor.supervisorPid)) {
+    console.log(JSON.stringify({ repaired: false, running: true, supervisorPid: descriptor.supervisorPid, removed: [] }, null, 2));
+    return;
+  }
+  if (!descriptor && existsSync(lockPath)) {
+    const ageMs = Date.now() - statSync(lockPath).mtimeMs;
+    if (ageMs < 30_000) throw new Error('Runtime lock is less than 30 seconds old; setup may still be in progress. Wait and retry.');
+  }
+  const removed: string[] = [];
+  for (const target of [descriptorPath, lockPath]) {
+    if (!existsSync(target)) continue;
+    unlinkSync(target);
+    removed.push(target);
+  }
+  console.log(JSON.stringify({ repaired: removed.length > 0, running: false, priorSupervisorPid: descriptor?.supervisorPid ?? null, removed }, null, 2));
+}
+
+function importResearch(filePath: string | undefined) {
+  if (!filePath) throw new Error('Usage: pnpm app:import -- path/to/research.xlsx');
+  const descriptor = readDescriptor();
+  if (descriptor && processAlive(descriptor.supervisorPid)) throw new Error('Stop Fantasy Draft Assistant before importing a research workbook.');
+  const dataset = readResearchWorkbook(filePath);
+  const databasePath = join(dataDirectory, 'app.sqlite');
+  const repository = new DraftRepository({ databasePath });
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupPath = repository.backup(join(dataDirectory, 'backups', `before-research-import-${stamp}.sqlite`)).path;
+    const result = repository.importResearchDataset(dataset);
+    const integrity = repository.integrity();
+    console.log(JSON.stringify({
+      dataDirectory, databasePath, backupPath,
+      dataset: {
+        source: dataset.sourceFilename, checksum: dataset.checksum, players: dataset.players.length,
+        positions: dataset.players.reduce<Record<string, number>>((counts, player) => {
+          counts[player.position] = (counts[player.position] ?? 0) + 1;
+          return counts;
+        }, {}),
+        league: dataset.leagueName, team: dataset.teamName, teamCount: dataset.teamCount,
+        rounds: dataset.rounds, userSlot: dataset.userSlot,
+      },
+      result, integrity,
+    }, null, 2));
+    if (!integrity.ok) process.exitCode = 1;
+  } finally {
+    repository.close();
+  }
+}
+
+function importIntelligence(statsPath: string | undefined, rosterPath: string | undefined) {
+  if (!statsPath || !rosterPath) throw new Error('Usage: pnpm app:enrich -- path/to/stats_player_week_2025.csv path/to/roster_2026.csv');
+  const descriptor = readDescriptor();
+  if (descriptor && processAlive(descriptor.supervisorPid)) throw new Error('Stop Fantasy Draft Assistant before importing player intelligence.');
+  const dataset = readPlayerIntelligence(statsPath, rosterPath);
+  const databasePath = join(dataDirectory, 'app.sqlite');
+  const repository = new DraftRepository({ databasePath });
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupPath = repository.backup(join(dataDirectory, 'backups', `before-intelligence-import-${stamp}.sqlite`)).path;
+    const result = repository.importPlayerIntelligence(dataset.profiles);
+    const integrity = repository.integrity();
+    console.log(JSON.stringify({ dataDirectory, databasePath, backupPath, checksum: dataset.checksum, result, integrity }, null, 2));
+    if (!integrity.ok) process.exitCode = 1;
+  } finally {
+    repository.close();
+  }
+}
+
 function stop() { const descriptor = readDescriptor(); if (!descriptor || !processAlive(descriptor.supervisorPid)) return console.log('Fantasy Draft Assistant is not running.'); process.kill(descriptor.supervisorPid, 'SIGTERM'); console.log('Stopping Fantasy Draft Assistant.'); }
 
-if (command === 'start') await start(); else if (command === 'doctor') doctor(); else if (command === 'backup') backup(); else if (command === 'stop') stop(); else throw new Error(`Unknown command: ${command}`);
+if (command === 'start') await start();
+else if (command === 'doctor') doctor();
+else if (command === 'backup') backup();
+else if (command === 'repair-runtime') repairRuntime();
+else if (command === 'import-research') importResearch(process.argv.slice(3).find((argument) => argument !== '--'));
+else if (command === 'import-intelligence') {
+  const paths = process.argv.slice(3).filter((argument) => argument !== '--');
+  importIntelligence(paths[0], paths[1]);
+}
+else if (command === 'stop') stop();
+else throw new Error(`Unknown command: ${command}`);

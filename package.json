@@ -19,8 +19,17 @@
     "test:replay": "vitest run tests/replay",
     "verify": "pnpm typecheck && pnpm test && pnpm lint && pnpm build",
     "app:doctor": "tsx apps/cli/src/index.ts doctor",
+    "app:repair-runtime": "tsx apps/cli/src/index.ts repair-runtime",
     "app:backup": "tsx apps/cli/src/index.ts backup",
-    "app:stop": "tsx apps/cli/src/index.ts stop"
+    "app:import": "tsx apps/cli/src/index.ts import-research",
+    "app:enrich": "tsx apps/cli/src/index.ts import-intelligence",
+    "app:stop": "tsx apps/cli/src/index.ts stop",
+    "app:setup:practice": "./scripts/setup.sh practice",
+    "app:setup:real": "./scripts/setup.sh real",
+    "app:status": "./scripts/validate-connections.sh",
+    "app:status:espn": "./scripts/validate-connections.sh --require-espn",
+    "app:validate:visual": "node ./scripts/visual-validate.mjs",
+    "app:teardown": "./scripts/teardown.sh"
   },
   "devDependencies": {
     "@fda/db": "workspace:*",

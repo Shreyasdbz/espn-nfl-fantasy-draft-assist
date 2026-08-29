@@ -160,10 +160,10 @@ export class BrowserController {
   }
 
   async ingestTabBridge(input: TabBridgeObservation) {
-    if (input.picks.length === 0) return this.health();
     this.repository.activateObservedSession({
       externalDraftId: input.externalDraftId, name: 'ESPN observed draft', teamCount: input.teamCount,
-      rounds: input.rounds, userSlot: input.userSlot ? Math.min(input.userSlot, input.teamCount) : undefined, replace: true,
+      rounds: input.rounds, userSlot: input.userSlot ? Math.min(input.userSlot, input.teamCount) : undefined,
+      roster: input.leagueSettings?.roster, positionLimits: input.leagueSettings?.positionLimits, replace: true,
     });
     this.auth = 'authenticated'; this.detected = true; this.attached = true; this.state = 'observing'; this.capture = 'healthy';
     const facts = { picks: input.picks, players: input.players };

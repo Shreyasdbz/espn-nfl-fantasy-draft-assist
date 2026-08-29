@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DraftRepository } from '@fda/db';
+import type { ResearchDataset } from '@fda/db';
 import type { ObservationPlayer } from '../../packages/contracts/src/index.ts';
 
 const repositories: DraftRepository[] = [];
@@ -14,6 +15,42 @@ function repository() {
 afterEach(() => { for (const repo of repositories.splice(0)) repo.sqlite.close(); });
 
 describe('draft repository invariants', () => {
+  it('imports a versioned research catalog idempotently and configures a blank practice session', () => {
+    const repo = repository();
+    const dataset: ResearchDataset = {
+      checksum: 'a'.repeat(64), sourceFilename: 'research.xlsx', sourcePath: '/tmp/research.xlsx',
+      leagueName: 'Research League', teamName: 'Research Team', teamCount: 8, rounds: 16, userSlot: 8,
+      scoring: 'Full PPR; 4-point passing TDs', roster: { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 2, DST: 1, K: 1, BENCH: 6 },
+      thesis: 'Stable first turn, then upside', updatedAt: '2026-08-27T04:00:00.000Z',
+      players: [
+        {
+          name: 'Jahmyr Gibbs', position: 'RB', team: 'DET', byeWeek: 6, espnRank: 1, modelRank: 1,
+          positionalRank: 1, adp: 1, recommendedRound: 1, plannedPick: 8, phase: 'Anchor',
+          archetype: 'Volume + contingency', reliability: 9, ceiling: 10, opportunity: 9, roleClarity: 9,
+          risk: 3, visionScore: 10.2, modelSignal: 'Priority', userTag: 'Use Model', injuryNews: '',
+          whyFits: 'Fits the build.', failureCase: 'Workload can fall.', alternatives: 'Take the next tier.',
+          pairingConstruction: 'Pair with a WR.', earliestPick: 8, targetPick: 8, latestPick: 9,
+          espnSource: 'https://example.com/espn', adpSource: 'https://example.com/adp',
+          analysisSource: 'https://example.com/analysis', importedDraftStatus: 'Available', updatedAt: '2026-08-27T04:00:00.000Z',
+        },
+      ],
+    };
+    const first = repo.importResearchDataset(dataset);
+    const repeat = repo.importResearchDataset(dataset);
+    const imported = repo.listPlayers().filter((player) => player.research);
+    expect(first).toMatchObject({ rowCount: 1, inserted: 1, unchanged: false, configuredSession: true });
+    expect(repeat).toMatchObject({ rowCount: 1, inserted: 0, updated: 0, unchanged: true });
+    expect(imported).toHaveLength(1);
+    expect(imported[0]).toMatchObject({ name: 'Jahmyr Gibbs', overallRank: 1, positionalRank: 1, adp: 1, upside: 100, reliability: 90, risk: 30 });
+    expect(imported[0]?.research).toMatchObject({ visionScore: 10.2, targetPick: 8, whyFits: 'Fits the build.' });
+    expect(repo.listPlayers().filter((player) => player.source.startsWith('Bundled demo')).every((player) => player.excluded)).toBe(true);
+    const active = repo.getActiveSession();
+    const config = repo.sqlite.prepare('SELECT config_json FROM league_config_versions WHERE id=?').get(active.league_config_version_id) as { config_json: string };
+    expect(active.user_slot).toBe(8);
+    expect(JSON.parse(config.config_json)).toMatchObject({ teamCount: 8, rounds: 16, source: 'research-workbook' });
+    expect(repo.integrity().ok).toBe(true);
+  });
+
   it('applies an idempotent manual pick and rejects stale revisions', () => {
     const repo = repository();
     const session = repo.getActiveSession();
@@ -78,7 +115,7 @@ describe('draft repository invariants', () => {
     const config = repo.sqlite.prepare('SELECT config_json FROM league_config_versions WHERE id=?').get(active.league_config_version_id) as { config_json: string };
     expect(active.external_draft_id).toBe('practice-419272');
     expect(active.user_slot).toBe(8);
-    expect(JSON.parse(config.config_json)).toMatchObject({ teamCount: 8, rounds: 16, scoring: 'PPR', source: 'espn-observed' });
+    expect(JSON.parse(config.config_json)).toMatchObject({ teamCount: 8, rounds: 16, scoring: 'Full PPR; 4-point passing TDs', source: 'espn-observed' });
   });
 
   it('persists the one environment switch independently of session semantics', () => {

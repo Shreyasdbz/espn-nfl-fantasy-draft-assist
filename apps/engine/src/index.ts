@@ -38,20 +38,30 @@ const browser = new BrowserController(repository, join(dataDirectory, 'chrome-pr
 
 function health(): Health {
   const integrity = repository.integrity();
-  return { engine: integrity.ok ? 'healthy' : 'degraded', database: integrity.ok ? 'healthy' : 'degraded', ...browser.health(), schemaVersion: '0002_draft_environment', engineInstanceId };
+  return { engine: integrity.ok ? 'healthy' : 'degraded', database: integrity.ok ? 'healthy' : 'degraded', ...browser.health(), schemaVersion: '0004_player_intelligence', engineInstanceId };
 }
 
 app.addHook('onRequest', async (request, reply) => {
   const pathname = request.url.split('?')[0];
+  const origin = request.headers.origin;
+  const extensionOrigin = typeof origin === 'string' && /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
+  if (pathname === '/v1/bridge/extension-config') {
+    if (origin && !extensionOrigin) return reply.code(403).send({ code: 'BRIDGE_REJECTED', message: 'Chrome extension origin required' });
+    reply.header('access-control-allow-origin', extensionOrigin ? origin : 'null');
+    reply.header('access-control-allow-methods', 'GET, OPTIONS');
+    reply.header('access-control-allow-private-network', 'true');
+    if (request.method === 'OPTIONS') return reply.code(204).send();
+    return;
+  }
   if (pathname === '/v1/bridge/observe') {
-    const origin = request.headers.origin;
-    reply.header('access-control-allow-origin', origin === 'https://fantasy.espn.com' ? origin : 'null');
+    const allowedOrigin = origin === 'https://fantasy.espn.com' || extensionOrigin;
+    reply.header('access-control-allow-origin', allowedOrigin ? origin : 'null');
     reply.header('access-control-allow-methods', 'POST, OPTIONS');
     reply.header('access-control-allow-headers', 'content-type');
     reply.header('access-control-allow-private-network', 'true');
     if (request.method === 'OPTIONS') return reply.code(204).send();
     const supplied = new URL(request.url, 'http://127.0.0.1').searchParams.get('token');
-    if (origin !== 'https://fantasy.espn.com' || supplied !== bridgeToken) return reply.code(403).send({ code: 'BRIDGE_REJECTED', message: 'ESPN bridge origin or token rejected' });
+    if (!allowedOrigin || supplied !== bridgeToken) return reply.code(403).send({ code: 'BRIDGE_REJECTED', message: 'ESPN bridge origin or token rejected' });
     return;
   }
   const host = request.headers.host?.split(':')[0];
@@ -118,6 +128,7 @@ app.post('/v1/operations/:id/undo', async (request) => { const result = reposito
 app.post('/v1/browser/start', async () => { const result = await browser.start(); emit('browser.start', 'observer.health.changed'); return result; });
 app.post('/v1/browser/bind-page', async (request) => { const parsed = BindPageCommandSchema.parse(request.body); const result = await browser.bindPage(parsed.body.pageIndex); emit('browser.bind', 'observer.health.changed'); return result; });
 app.get('/v1/browser/tab-bridge', async () => ({ bookmarklet: buildEspnTabBridge(`http://127.0.0.1:${port}/v1/bridge/observe?token=${bridgeToken}`) }));
+app.get('/v1/bridge/extension-config', async () => ({ endpoint: `http://127.0.0.1:${port}/v1/bridge/observe?token=${bridgeToken}` }));
 app.post('/v1/bridge/observe', async (request) => {
   const payload = typeof request.body === 'string' ? JSON.parse(request.body) : request.body;
   const parsed = TabBridgeObservationSchema.parse(payload);

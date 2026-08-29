@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@fda/db": "workspace:*"
+    "@fda/contracts": "workspace:*",
+    "@fda/db": "workspace:*",
+    "csv-parse": "6.1.0",
+    "xlsx": "0.18.5"
   },
   "devDependencies": {
     "tsx": "4.20.6",

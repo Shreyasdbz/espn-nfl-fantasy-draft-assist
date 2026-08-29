@@ -12,6 +12,72 @@ export type DraftEnvironment = z.infer<typeof DraftEnvironmentSchema>;
 export const AuthoritySchema = z.enum(['manual', 'snapshot', 'structured', 'dom', 'simulator']);
 export type Authority = z.infer<typeof AuthoritySchema>;
 
+export const PlayerResearchSchema = z.object({
+  espnRank: z.number().int().positive(),
+  recommendedRound: z.number().int().positive().nullable(),
+  plannedPick: z.number().int().positive().nullable(),
+  phase: z.string(),
+  archetype: z.string(),
+  opportunity: z.number().min(0).max(10),
+  roleClarity: z.number().min(0).max(10),
+  visionScore: z.number(),
+  modelSignal: z.string(),
+  userTag: z.string(),
+  injuryNews: z.string(),
+  whyFits: z.string(),
+  failureCase: z.string(),
+  alternatives: z.string(),
+  pairingConstruction: z.string(),
+  earliestPick: z.number().int().positive().nullable(),
+  targetPick: z.number().int().positive().nullable(),
+  latestPick: z.number().int().positive().nullable(),
+  espnSource: z.string(),
+  adpSource: z.string(),
+  analysisSource: z.string(),
+  importedDraftStatus: z.string(),
+  researchedAt: z.string(),
+});
+export type PlayerResearch = z.infer<typeof PlayerResearchSchema>;
+
+export const PlayerEvidenceSchema = z.object({
+  source: z.string().url(),
+  kind: z.string(),
+  claim: z.string(),
+});
+
+export const PlayerIntelligenceSchema = z.object({
+  profileVersion: z.string(),
+  sampleSeason: z.number().int(),
+  games: z.number().int().nonnegative(),
+  age: z.number().nullable(),
+  rosterStatus: z.string().nullable(),
+  priorTeam: z.string().nullable(),
+  currentTeam: z.string().nullable(),
+  fantasyPointsPpr: z.number().nullable(),
+  fantasyPpgPpr: z.number().nullable(),
+  lateSeasonPpgPpr: z.number().nullable(),
+  carries: z.number().int().nullable(),
+  targets: z.number().int().nullable(),
+  receptions: z.number().int().nullable(),
+  scrimmageYards: z.number().int().nullable(),
+  totalTouchdowns: z.number().int().nullable(),
+  opportunitiesPerGame: z.number().nullable(),
+  targetShare: z.number().nullable(),
+  airYardsShare: z.number().nullable(),
+  trendScore: z.number().nullable(),
+  floorScore: z.number().min(0).max(100),
+  ceilingScore: z.number().min(0).max(100),
+  roleSummary: z.string(),
+  floorCase: z.string(),
+  ceilingCase: z.string(),
+  riskNote: z.string(),
+  evidence: z.array(PlayerEvidenceSchema),
+  sourceCount: z.number().int().positive(),
+  dataQuality: z.enum(['strong', 'partial', 'context-only']),
+  researchedAt: z.string(),
+});
+export type PlayerIntelligence = z.infer<typeof PlayerIntelligenceSchema>;
+
 export const PlayerSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -29,6 +95,8 @@ export const PlayerSchema = z.object({
   source: z.string(),
   updatedAt: z.string(),
   excluded: z.boolean(),
+  research: PlayerResearchSchema.nullable().optional(),
+  intelligence: PlayerIntelligenceSchema.nullable().optional(),
 });
 export type Player = z.infer<typeof PlayerSchema>;
 
@@ -72,6 +140,46 @@ export const RecommendationSchema = z.object({
 });
 export type Recommendation = z.infer<typeof RecommendationSchema>;
 
+export const RosterRulesSchema = z.object({
+  QB: z.number().int().nonnegative(), RB: z.number().int().nonnegative(), WR: z.number().int().nonnegative(),
+  TE: z.number().int().nonnegative(), FLEX: z.number().int().nonnegative(), K: z.number().int().nonnegative(),
+  DST: z.number().int().nonnegative(), BENCH: z.number().int().nonnegative(),
+});
+export type RosterRules = z.infer<typeof RosterRulesSchema>;
+
+export const PositionLimitsSchema = z.object({
+  QB: z.number().int().nonnegative(), RB: z.number().int().nonnegative(), WR: z.number().int().nonnegative(),
+  TE: z.number().int().nonnegative(), K: z.number().int().nonnegative(), DST: z.number().int().nonnegative(),
+});
+export type PositionLimits = z.infer<typeof PositionLimitsSchema>;
+
+export const MarketSignalSchema = z.object({
+  position: PositionSchema,
+  recentPicks: z.number().int().nonnegative(),
+  upcomingDemand: z.number().min(-1).max(1),
+  availableInTier: z.number().int().nonnegative(),
+  tierDrop: z.number(),
+  pressure: z.number().min(-1).max(1),
+  label: z.enum(['cool', 'stable', 'watch', 'run']),
+  detail: z.string(),
+});
+export type MarketSignal = z.infer<typeof MarketSignalSchema>;
+
+export const RosterContextSchema = z.object({
+  phase: z.enum(['foundation', 'balance', 'endgame']),
+  picksRemaining: z.number().int().nonnegative(),
+  startersOpen: z.number().int().nonnegative(),
+  gate: z.enum(['none', 'forced-needs']),
+  positionCounts: z.record(PositionSchema, z.number().int().nonnegative()),
+  rosterRules: RosterRulesSchema,
+  positionLimits: PositionLimitsSchema,
+  openSlots: RosterRulesSchema,
+  requiredPositions: z.array(PositionSchema),
+  saturatedPositions: z.array(PositionSchema),
+  marketSignals: z.array(MarketSignalSchema),
+});
+export type RosterContext = z.infer<typeof RosterContextSchema>;
+
 export const HealthSchema = z.object({
   engine: z.enum(['healthy', 'degraded']),
   database: z.enum(['healthy', 'degraded']),
@@ -106,6 +214,7 @@ export const DraftStateSchema = z.object({
   picks: z.array(DraftPickSchema),
   players: z.array(PlayerSchema.extend({ drafted: z.boolean() })),
   recommendations: z.array(RecommendationSchema),
+  recommendationContext: RosterContextSchema,
   roster: z.array(DraftPickSchema),
   conflicts: z.array(z.object({ id: z.string(), overallPick: z.number(), summary: z.string() })),
   lastOperation: z.object({ id: z.string(), type: z.string(), undoable: z.boolean() }).nullable(),
@@ -150,6 +259,10 @@ export const TabBridgeObservationSchema = z.object({
   teamCount: z.number().int().min(2).max(20),
   rounds: z.number().int().min(1).max(30),
   userSlot: z.number().int().min(1).max(20).nullable().optional(),
+  leagueSettings: z.object({
+    roster: RosterRulesSchema.partial().optional(),
+    positionLimits: PositionLimitsSchema.partial().optional(),
+  }).optional(),
   observedAt: z.string(),
   picks: z.array(z.object({
     overallPick: z.number().int().positive(),
