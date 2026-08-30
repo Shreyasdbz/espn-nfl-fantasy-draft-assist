@@ -215,17 +215,19 @@ export function recommendPlayers(input: {
   const catalogAsOf = Math.max(Date.now(), ...catalog.map((player) => new Date(player.updatedAt).getTime()).filter(Number.isFinite), 0);
   const byes = new Map<number, number>();
   for (const pick of roster) if (pick.position !== 'K' && pick.position !== 'DST' && pick.team) { const player = input.players.find((candidate) => candidate.id === pick.playerId); if (player?.byeWeek) byes.set(player.byeWeek, (byes.get(player.byeWeek) ?? 0) + 1); }
-  const specialTeamsWindow = context.picksRemaining <= 4 || context.gate === 'forced-needs';
   const required = new Set(context.requiredPositions); const saturated = new Set(context.saturatedPositions);
   const signals = new Map(context.marketSignals.map((signal) => [signal.position, signal]));
-  return available.filter((player) => {
+  const isRosterLegal = (player: Player): boolean => {
     if (context.picksRemaining === 0) return false;
     if ((player.position === 'K' && rules.K === 0) || (player.position === 'DST' && rules.DST === 0)) return false;
-    if ((player.position === 'K' || player.position === 'DST') && !specialTeamsWindow) return false;
     if (context.positionCounts[player.position] >= limits[player.position]) return false;
     if (context.gate === 'forced-needs' && !required.has(player.position)) return false;
     return !saturated.has(player.position);
-  }).map((player) => {
+  };
+  const hasLegalSkillPlayer = available.some((player) => player.position !== 'K' && player.position !== 'DST' && isRosterLegal(player));
+  const specialTeamsWindow = context.picksRemaining <= 4 || context.gate === 'forced-needs' || !hasLegalSkillPlayer;
+  return available.filter((player) => isRosterLegal(player)
+    && ((player.position !== 'K' && player.position !== 'DST') || specialTeamsWindow)).map((player) => {
     const effectiveReliability = player.intelligence?.floorScore ?? player.reliability;
     const effectiveUpside = player.intelligence?.ceilingScore ?? player.upside;
     const valueRaw = input.currentOverallPick - (player.adp ?? player.overallRank); const valueNorm = clamp(valueRaw / 24);

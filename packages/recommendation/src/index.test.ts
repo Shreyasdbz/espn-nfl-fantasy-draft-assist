@@ -70,6 +70,17 @@ describe('deterministic recommendations', () => {
     expect(recommendations[0]?.warnings).toContain('Mandatory roster completion gate');
   });
 
+  it('unlocks K and DST when skill-position depth is capped before the endgame window', () => {
+    const players = demoPlayers();
+    const picks = rosterPicks(players, ['QB', 'RB', 'RB', 'RB', 'RB', 'WR', 'WR', 'WR', 'WR', 'TE', 'TE']);
+    const recommendations = recommendPlayers({
+      players, picks, userSlot: 4, teamCount: 8, currentOverallPick: 89, nextUserPick: 89,
+    });
+
+    expect(recommendations).not.toHaveLength(0);
+    expect(recommendations.every((item) => item.position === 'K' || item.position === 'DST')).toBe(true);
+  });
+
   it('increases roster-fit weight as the draft moves from foundation to balance', () => {
     const players = demoPlayers();
     const early = recommendPlayers({ players, picks: [], userSlot: 4, currentOverallPick: 4, nextUserPick: 17 });
