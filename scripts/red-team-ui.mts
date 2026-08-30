@@ -64,12 +64,31 @@ const userRosterWithoutDst = baseline.roster.filter((pick) => pick.position !== 
   return { ...pick, overallPick, round, pickInRound, draftingSlot: 8 };
 });
 
+const fourWrRoster = [
+  ...baseline.roster.filter((pick) => pick.position === 'WR').slice(0, 4),
+  ...baseline.roster.filter((pick) => pick.position === 'QB').slice(0, 1),
+].map((pick, index): DraftPick => {
+  const overallPick = turnPicks[index]!;
+  return {
+    ...pick,
+    overallPick,
+    round: Math.ceil(overallPick / 8),
+    pickInRound: ((overallPick - 1) % 8) + 1,
+    draftingSlot: 8,
+  };
+});
+const fourWrPlayerIds = new Set(fourWrRoster.map((pick) => pick.playerId));
+const fourWrDraft = [
+  ...baseline.picks.filter((pick) => pick.overallPick < 41 && pick.draftingSlot !== 8 && !fourWrPlayerIds.has(pick.playerId)),
+  ...fourWrRoster,
+].sort((left, right) => left.overallPick - right.overallPick);
+
 const scenarios = [
   { name: 'early-turn', state: rebuild({ name: 'early-turn', picks: baseline.picks.slice(0, 7), currentOverallPick: 8, nextUserPick: 8, attached: true }) },
-  { name: 'four-wr-balance', state: rebuild({ name: 'four-wr-balance', picks: baseline.picks.slice(0, 40), currentOverallPick: 41, nextUserPick: 41, attached: true }) },
+  { name: 'four-wr-balance', state: rebuild({ name: 'four-wr-balance', picks: fourWrDraft, currentOverallPick: 41, nextUserPick: 41, attached: true }) },
   { name: 'forced-dst', state: rebuild({ name: 'forced-dst', picks: userRosterWithoutDst, currentOverallPick: 121, nextUserPick: 121, attached: true }) },
   { name: 'active-offline', state: rebuild({ name: 'active-offline', picks: baseline.picks.slice(0, 7), currentOverallPick: 8, nextUserPick: 8 }) },
-  { name: 'completed-offline', state: baseline },
+  { name: 'completed-offline', state: rebuild({ name: 'completed-offline', picks: baseline.picks, currentOverallPick: 128, nextUserPick: null }) },
   { name: 'stale-attached', state: rebuild({ name: 'stale-attached', picks: baseline.picks.slice(0, 7), currentOverallPick: 8, nextUserPick: 8, attached: true, stale: true }) },
 ] as const;
 
@@ -117,10 +136,16 @@ try {
 
       if (['active-offline', 'stale-attached'].includes(scenario.name) && !(await page.locator('.freshness-warning').isVisible())) failures.push('untrusted active state did not show the decision warning');
 
+      const pickChip = await page.locator('.pick-chip').boundingBox();
+      const pickValue = await page.locator('.pick-chip strong').boundingBox();
+      if (!pickChip || !pickValue || pickValue.x < pickChip.x - 0.5 || pickValue.x + pickValue.width > pickChip.x + pickChip.width + 0.5) failures.push('round.pick value overflowed its accent chip');
+
       if (scenario.name === 'completed-offline') {
         if (!(await page.getByText('No more picks required').isVisible())) failures.push('completed state did not render completion card');
       } else {
         if (!(await page.locator('.recommendation-list').isVisible())) failures.push('active state did not render recommendations');
+        const recommendationHeadings = await page.locator('.recommendation-column-heads span').allTextContents();
+        if (recommendationHeadings.join('|') !== 'RK|Pos|Player|Fit|Availability|Why') failures.push(`recommendation column titles were incomplete: ${recommendationHeadings.join('|')}`);
         const firstExplain = page.getByRole('button', { name: /^Explain / }).first();
         await firstExplain.click();
         if (!(await page.locator('.recommendation-detail').first().isVisible())) failures.push('recommendation explanation did not expand');
@@ -142,6 +167,8 @@ try {
       const recommendationNames = new Set(await page.locator('.recommendation-list .rec-player').allTextContents());
       const nextTierNames = await page.locator('.live-page .player-table .player-name').allTextContents();
       if (nextTierNames.some((name) => recommendationNames.has(name))) failures.push('recommended player was duplicated in the next tier');
+      const positionMarkOffsets = await page.locator('.live-page .player-table .player-name .position-mark').evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().left));
+      if (positionMarkOffsets.length > 1 && Math.max(...positionMarkOffsets) - Math.min(...positionMarkOffsets) > 1) failures.push(`player position marks drifted by ${(Math.max(...positionMarkOffsets) - Math.min(...positionMarkOffsets)).toFixed(1)}px`);
 
       await page.locator('.primary-nav button').filter({ hasText: 'Players' }).click();
       const availableSwitch = page.getByRole('switch');
@@ -153,6 +180,13 @@ try {
       await page.locator('.position-tabs button').filter({ hasText: /^RB$/ }).click();
       const visiblePositions = await page.locator('.player-table tbody tr .position-mark').allTextContents();
       if (visiblePositions.some((position) => position !== 'RB')) failures.push('RB position filter leaked another position');
+      await page.locator('.primary-nav button').filter({ hasText: 'Live' }).click();
+      await page.keyboard.press('/');
+      try {
+        await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Search players', undefined, { timeout: 1_000 });
+      } catch {
+        failures.push('/ shortcut did not focus player search');
+      }
       await page.locator('.primary-nav button').filter({ hasText: 'Live' }).click();
 
       await page.getByRole('button', { name: 'Open tools' }).click();
