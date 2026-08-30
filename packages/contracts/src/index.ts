@@ -263,7 +263,7 @@ export const TabBridgeObservationSchema = z.object({
     roster: RosterRulesSchema.partial().optional(),
     positionLimits: PositionLimitsSchema.partial().optional(),
   }).optional(),
-  observedAt: z.string(),
+  observedAt: z.string().datetime({ offset: true }),
   picks: z.array(z.object({
     overallPick: z.number().int().positive(),
     externalPlayerId: z.string().max(160).optional(),
@@ -280,6 +280,7 @@ export const TabBridgeObservationSchema = z.object({
     overallRank: z.number().positive().nullable(),
     positionalRank: z.number().positive().nullable(),
   })).max(500),
+  catalogPlayerCount: z.number().int().nonnegative().max(500).optional(),
 });
 export type TabBridgeObservation = z.infer<typeof TabBridgeObservationSchema>;
 

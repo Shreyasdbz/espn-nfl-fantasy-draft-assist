@@ -1,5 +1,16 @@
 (function fourthDownEspnWatcher() {
   if (window.__fourthDownExtensionWatcher) clearInterval(window.__fourthDownExtensionWatcher);
+  const runStorageKey = 'fourth-down-draft-run-id';
+  let draftRunId;
+  try {
+    const storedRunId = sessionStorage.getItem(runStorageKey);
+    const navigationType = performance.getEntriesByType('navigation')[0]?.type;
+    draftRunId = storedRunId && navigationType === 'reload' ? storedRunId : crypto.randomUUID();
+    sessionStorage.setItem(runStorageKey, draftRunId);
+  } catch {
+    draftRunId = window.__fourthDownDraftRunId || `page-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    window.__fourthDownDraftRunId = draftRunId;
+  }
 
   function clean(value) { return String(value || '').replace(/\s+/g, ' ').trim(); }
   function playerId(name) { return `dom:${clean(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}`; }
@@ -79,6 +90,7 @@
         positionalRank: rank,
       });
     });
+    const catalogPlayerCount = playerMap.size;
     rawPicks.forEach((pick) => {
       if (!playerMap.has(playerId(pick.playerName))) {
         playerMap.set(playerId(pick.playerName), {
@@ -102,10 +114,11 @@
     }).sort((left, right) => right.count - left.count).find((candidate) => candidate.count >= 2);
     const ownPick = rawPicks.find((pick) => scheduledUserTeam && pick.draftingTeam.toLowerCase() === scheduledUserTeam.team.toLowerCase());
     const userSlot = ownPick ? (ownPick.round % 2 ? ownPick.pickInRound : teamCount - ownPick.pickInRound + 1) : null;
-    const externalDraftId = new URL(location.href).searchParams.get('leagueId') || location.pathname;
+    const leagueKey = new URL(location.href).searchParams.get('leagueId') || location.pathname;
+    const externalDraftId = `${leagueKey}:run:${draftRunId}`;
     return {
       externalDraftId, teamCount, rounds, userSlot, leagueSettings: leagueSettings(rendered, rounds), observedAt: new Date().toISOString(),
-      picks, players: Array.from(playerMap.values()),
+      picks, players: Array.from(playerMap.values()), catalogPlayerCount,
     };
   }
 

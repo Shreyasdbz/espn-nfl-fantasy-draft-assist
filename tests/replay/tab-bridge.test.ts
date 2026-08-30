@@ -88,7 +88,7 @@ describe('ESPN tab bridge', () => {
     parentWindow.open();
     await intervalTick!();
     const snapshot = JSON.parse(postedBody) as { externalDraftId: string; teamCount: number; picks: unknown[] };
-    expect(snapshot.externalDraftId).toBe('popup-456');
+    expect(snapshot.externalDraftId).toMatch(/^popup-456:run:page-/);
     expect(snapshot.teamCount).toBe(8);
     expect(snapshot.picks).toHaveLength(2);
     expect(parentAttributes.get('data-fourth-down-bridge')).toBe('active');

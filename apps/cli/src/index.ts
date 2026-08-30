@@ -11,10 +11,27 @@ const dataDirectory = defaultDataDirectory();
 const runtimeDirectory = join(dataDirectory, 'runtime');
 const descriptorPath = join(runtimeDirectory, 'runtime.json');
 const lockPath = join(runtimeDirectory, 'app.lock');
+const bridgeTokenPath = join(runtimeDirectory, 'bridge.token');
 type Descriptor = { supervisorPid: number; enginePort: number; webPort: number; secret: string; startedAt: string };
 
 function readDescriptor(): Descriptor | null { try { return JSON.parse(readFileSync(descriptorPath, 'utf8')) as Descriptor; } catch { return null; } }
 function processAlive(pid: number): boolean { try { process.kill(pid, 0); return true; } catch { return false; } }
+function ensureBridgeToken(): string {
+  try { return readFileSync(bridgeTokenPath, 'utf8').trim(); } catch {
+    const token = randomBytes(24).toString('base64url');
+    mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 });
+    writeFileSync(bridgeTokenPath, token, { mode: 0o600 });
+    return token;
+  }
+}
+
+function pairExtension() {
+  const token = ensureBridgeToken();
+  const extensionDirectory = process.env.FDA_EXTENSION_DIRECTORY ?? join(process.cwd(), 'apps', 'chrome-extension');
+  const target = join(extensionDirectory, 'pairing.local.js');
+  writeFileSync(target, `self.FOURTH_DOWN_PAIRING_TOKEN=${JSON.stringify(token)};\n`, { mode: 0o600 });
+  console.log(`Fourth Down extension pairing refreshed at ${target}`);
+}
 
 async function start() {
   mkdirSync(runtimeDirectory, { recursive: true, mode: 0o700 });
@@ -123,6 +140,7 @@ if (command === 'start') await start();
 else if (command === 'doctor') doctor();
 else if (command === 'backup') backup();
 else if (command === 'repair-runtime') repairRuntime();
+else if (command === 'pair-extension') pairExtension();
 else if (command === 'import-research') importResearch(process.argv.slice(3).find((argument) => argument !== '--'));
 else if (command === 'import-intelligence') {
   const paths = process.argv.slice(3).filter((argument) => argument !== '--');

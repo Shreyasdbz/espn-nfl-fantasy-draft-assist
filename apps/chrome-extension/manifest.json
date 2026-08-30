@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "Fourth Down ESPN Watcher",
   "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApzJ7+Q/5uUgo0KOmvX0DwFbpEeZ5H8AofvphvDO8uArcv8h6eFx2rIoQtfedpSVg+5cTkqcy+LsBN9T+IuQoGp/ltaG919bQ9pdXscrDbooBzguLTFXfW/6oA+zuO5/nYZHaQjV8/uNK1IdtnaLxjT0pZ1cqm6OnO0YgqG6kOPM7g/r0l+97NC7Zu3HdzkuTG0DMhphQkTtMecWlJiUnpim3u5wyR7wg+CpTMPQRUPKDcdppyGiw9BBMXBKsFqG716P2sl59Jbc3hG541wcmnzUYXICE7GjgAekjkGvPZH5qxo9vn8ZxXMuMrSvwFtniqtrseXmAr6FTd59ur+posQIDAQAB",
   "description": "Passively mirrors rendered ESPN fantasy draft picks into the local Fourth Down engine.",
   "permissions": ["storage"],
   "host_permissions": [

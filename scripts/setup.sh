@@ -32,6 +32,7 @@ data_dir="${FDA_DATA_DIR:-$(node -e 'const os=require("node:os"); const path=req
 runtime_dir="${data_dir}/runtime"
 log_path="${runtime_dir}/fourth-down.log"
 mkdir -p "${runtime_dir}"
+FDA_EXTENSION_DIRECTORY="${repo_root}/apps/chrome-extension" pnpm --silent app:pair-extension
 
 running="$(pnpm --silent app:doctor | node -e 'let value=""; process.stdin.on("data",chunk=>value+=chunk); process.stdin.on("end",()=>{const start=value.indexOf("{"); const report=JSON.parse(value.slice(start)); process.stdout.write(String(report.runtime.running));});')"
 if [[ "${running}" != "true" ]]; then

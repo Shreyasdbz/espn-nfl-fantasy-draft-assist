@@ -71,6 +71,15 @@ describe('draft repository invariants', () => {
     expect(() => repo.applyPick({ commandId: 'duplicate-command-02', expectedRevision: 1, playerId: player.id, overallPick: 2, authority: 'manual' })).toThrow(/already drafted/);
   });
 
+  it('does not advance draft progress past the first missing pick', () => {
+    const repo = repository();
+    const players = repo.listPlayers();
+    repo.applyPick({ commandId: 'gap-pick-one', expectedRevision: 0, playerId: players[0]!.id, overallPick: 1, authority: 'structured' });
+    repo.applyPick({ commandId: 'gap-pick-three', expectedRevision: 1, playerId: players[1]!.id, overallPick: 3, authority: 'structured' });
+    const state = repo.getState({ engine: 'healthy', database: 'healthy', chrome: 'stopped', espnAuth: 'unknown', pageDetected: false, pageAttached: false, capture: 'idle', lastObservationAt: null, lastReconciledAt: null, schemaVersion: 'test', engineInstanceId: 'test' });
+    expect(state.session.currentOverallPick).toBe(2);
+  });
+
   it('does not revise a pick when a later snapshot reports the same player', () => {
     const repo = repository();
     const player = repo.listPlayers()[0]!;
@@ -91,6 +100,20 @@ describe('draft repository invariants', () => {
     repo.undoOperation(reset.operationId);
     expect(repo.getActiveSession().id).toBe(parent.id);
     expect(repo.listPicks(parent.id)).toHaveLength(1);
+  });
+
+  it('rejects an old reset undo after another draft became active', () => {
+    const repo = repository();
+    const parent = repo.getActiveSession();
+    const reset = repo.resetSession({ commandId: 'reset-before-switch', expectedRevision: 0, confirmation: { sessionId: parent.id, mode: parent.mode, pickCount: 0 } }) as { operationId: string };
+    const resetState = repo.getState({ engine: 'healthy', database: 'healthy', chrome: 'stopped', espnAuth: 'unknown', pageDetected: false, pageAttached: false, capture: 'idle', lastObservationAt: null, lastReconciledAt: null, schemaVersion: 'test', engineInstanceId: 'test' });
+    expect(resetState.lastOperation).toMatchObject({ id: reset.operationId, undoable: true });
+    repo.activateObservedSession({ externalDraftId: 'another-active-draft' });
+    const active = repo.getActiveSession().id;
+    expect(() => repo.undoOperation(reset.operationId)).toThrow(/replacement session is active/);
+    expect(repo.getActiveSession().id).toBe(active);
+    const activeRows = repo.sqlite.prepare("SELECT COUNT(*) AS count FROM draft_sessions WHERE state='ACTIVE'").get() as { count: number };
+    expect(activeRows.count).toBe(1);
   });
 
   it('creates an isolated observed session only when an ESPN draft is explicitly bound', () => {
@@ -118,6 +141,21 @@ describe('draft repository invariants', () => {
     expect(JSON.parse(config.config_json)).toMatchObject({ teamCount: 8, rounds: 16, scoring: 'Full PPR; 4-point passing TDs', source: 'espn-observed' });
   });
 
+  it('versions a changed ESPN roster config without violating the config name constraint', () => {
+    const repo = repository();
+    repo.activateObservedSession({ externalDraftId: 'practice-config-refresh', teamCount: 8, rounds: 16, userSlot: 8, replace: true });
+    expect(() => repo.activateObservedSession({
+      externalDraftId: 'practice-config-refresh', teamCount: 8, rounds: 16, userSlot: 8, replace: true,
+      roster: { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 2, K: 1, DST: 1, BENCH: 6 },
+      positionLimits: { QB: 4, RB: 8, WR: 8, TE: 3, K: 3, DST: 3 },
+    })).not.toThrow();
+    const active = repo.getActiveSession();
+    const config = repo.sqlite.prepare('SELECT name,version,config_json FROM league_config_versions WHERE id=?').get(active.league_config_version_id) as { name: string; version: number; config_json: string };
+    expect(config).toMatchObject({ name: '8-team ESPN observed', version: 2 });
+    expect(JSON.parse(config.config_json)).toMatchObject({ roster: { FLEX: 2, BENCH: 6 }, source: 'espn-observed-exact' });
+    expect(repo.integrity().ok).toBe(true);
+  });
+
   it('persists the one environment switch independently of session semantics', () => {
     const repo = repository();
     expect(repo.getDraftEnvironment()).toBe('PRACTICE');
@@ -136,9 +174,20 @@ describe('draft repository invariants', () => {
       position: index % 2 === 0 ? 'RB' : 'WR', team: 'BUF', adp: index + 1,
       projection: 300 - index, overallRank: index + 1, positionalRank: Math.floor(index / 2) + 1,
     }));
-    const result = repo.upsertObservedPlayers(players);
+    const result = repo.upsertObservedPlayers(players, 'espn', players.length);
     expect(result).toEqual({ upserted: 30, activatedCatalog: true });
     expect(repo.listPlayers().filter((player) => player.source.startsWith('Bundled demo')).every((player) => player.excluded)).toBe(true);
     expect(repo.listPlayers().filter((player) => player.source.startsWith('ESPN passive'))).toHaveLength(30);
+  });
+
+  it('does not activate a declared catalog count that the observation did not contain', () => {
+    const repo = repository();
+    const player: ObservationPlayer = {
+      externalPlayerId: 'observed-one', playerName: 'Observed One', position: 'RB', team: 'BUF',
+      adp: 1, projection: 300, overallRank: 1, positionalRank: 1,
+    };
+    const result = repo.upsertObservedPlayers([player], 'espn', 30);
+    expect(result).toEqual({ upserted: 1, activatedCatalog: false });
+    expect(repo.listPlayers().some((candidate) => candidate.source.startsWith('Bundled demo') && !candidate.excluded)).toBe(true);
   });
 });

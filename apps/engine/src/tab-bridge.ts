@@ -51,6 +51,7 @@ export function buildEspnTabBridge(endpoint: string): string {
         var rank=rankMatch?Number(rankMatch[1]):null; var projection=projectionMatch?Number(projectionMatch[1]):null;
         playerMap.set(playerId(name),{externalPlayerId:playerId(name),playerName:name,position:position(teamPosition[2].toUpperCase()),team:teamPosition[1].toUpperCase(),adp:rank,projection:projection,overallRank:rank,positionalRank:rank});
       });
+      var catalogPlayerCount=playerMap.size;
       rawPicks.forEach(function(pick){
         if(!playerMap.has(playerId(pick.playerName)))playerMap.set(playerId(pick.playerName),{externalPlayerId:playerId(pick.playerName),playerName:pick.playerName,position:pick.position,team:pick.team,adp:null,projection:null,overallRank:null,positionalRank:null});
       });
@@ -65,8 +66,10 @@ export function buildEspnTabBridge(endpoint: string): string {
       var rosterName=(scheduledUserTeam&&scheduledUserTeam.team)||completionLabels.find(function(label){return label&&draftingTeams.some(function(team){return team.toLowerCase()===label.toLowerCase();});});
       var ownPick=rawPicks.find(function(pick){return rosterName&&pick.draftingTeam.toLowerCase()===rosterName.toLowerCase();});
       var userSlot=ownPick?((ownPick.round%2)?ownPick.pickInRound:teamCount-ownPick.pickInRound+1):null;
-      var externalDraftId=new URL(targetLocation.href).searchParams.get('leagueId')||targetLocation.pathname;
-      return {externalDraftId:externalDraftId,teamCount:teamCount,rounds:rounds,userSlot:userSlot,leagueSettings:leagueSettings(rendered,rounds),observedAt:new Date().toISOString(),picks:picks,players:Array.from(playerMap.values())};
+      var leagueKey=new URL(targetLocation.href).searchParams.get('leagueId')||targetLocation.pathname;
+      var draftRunId=target.__fourthDownDraftRunId||(target.__fourthDownDraftRunId='page-'+Date.now()+'-'+Math.random().toString(36).slice(2));
+      var externalDraftId=leagueKey+':run:'+draftRunId;
+      return {externalDraftId:externalDraftId,teamCount:teamCount,rounds:rounds,userSlot:userSlot,leagueSettings:leagueSettings(rendered,rounds),observedAt:new Date().toISOString(),picks:picks,players:Array.from(playerMap.values()),catalogPlayerCount:catalogPlayerCount};
     }
     async function tick(){try{targets=targets.filter(function(target){return target&&!target.closed;});var snapshot=null;for(var index=0;index<targets.length&&!snapshot;index+=1){try{snapshot=collect(targets[index]);}catch(error){}}if(!snapshot){document.documentElement.setAttribute('data-fourth-down-bridge','waiting-for-picks');return;}document.documentElement.setAttribute('data-fourth-down-bridge','posting');await fetch(endpoint,{method:'POST',mode:'no-cors',headers:{'content-type':'text/plain'},body:JSON.stringify(snapshot)});document.documentElement.setAttribute('data-fourth-down-bridge','active');}catch(error){document.documentElement.setAttribute('data-fourth-down-bridge','error');console.warn('Fourth Down bridge',error);}}
     window.__fourthDownBridge={endpoint:endpoint,tick:tick,targets:targets,originalOpen:originalOpen,timer:setInterval(tick,2000)};tick();

@@ -3,6 +3,52 @@ import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 
 describe('Fourth Down Chrome extension', () => {
+  it('rotates the draft run on same-tab navigation but preserves it on refresh', () => {
+    const source = readFileSync(new URL('../../apps/chrome-extension/content.js', import.meta.url), 'utf8');
+    const execute = (navigationType: 'navigate' | 'reload') => {
+      const stored = new Map([['fourth-down-draft-run-id', 'prior-run']]);
+      runInNewContext(source, {
+        window: {}, document: { body: { innerText: '' }, documentElement: { setAttribute: () => undefined }, querySelectorAll: () => [] },
+        location: { href: 'https://fantasy.espn.com/football/team?leagueId=extension-789', pathname: '/football/team' },
+        sessionStorage: { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => stored.set(key, value) },
+        performance: { getEntriesByType: () => [{ type: navigationType }] },
+        crypto: { randomUUID: () => 'next-run' },
+        chrome: { runtime: { sendMessage: async () => ({ ok: true }) } },
+        setInterval: () => 1, clearInterval: () => undefined, URL, Date, console,
+      });
+      return stored.get('fourth-down-draft-run-id');
+    };
+    expect(execute('navigate')).toBe('next-run');
+    expect(execute('reload')).toBe('prior-run');
+  });
+
+  it('serializes tab claims so concurrent draft tabs cannot both win the lease', async () => {
+    const source = readFileSync(new URL('../../apps/chrome-extension/service-worker.js', import.meta.url), 'utf8');
+    let listener!: (message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => boolean;
+    let lease: unknown;
+    runInNewContext(source, {
+      self: { FOURTH_DOWN_PAIRING_TOKEN: 'test-pairing-token' },
+      importScripts: () => undefined,
+      chrome: {
+        storage: { session: {
+          get: async () => ({ draftTabLease: lease }),
+          set: async (value: { draftTabLease: unknown }) => { lease = value.draftTabLease; },
+        } },
+        runtime: { onMessage: { addListener: (value: typeof listener) => { listener = value; } } },
+      },
+      fetch: async () => ({ ok: true }),
+      Date,
+      Promise,
+      Error,
+    });
+    const observe = (tabId: number) => new Promise<unknown>((resolve) => {
+      expect(listener({ type: 'FOURTH_DOWN_OBSERVATION', snapshot: { externalDraftId: `draft-${tabId}` } }, { tab: { id: tabId } }, resolve)).toBe(true);
+    });
+    const [first, second] = await Promise.all([observe(11), observe(22)]);
+    expect(first).toEqual({ ok: true });
+    expect(second).toMatchObject({ ok: false });
+  });
+
   it('normalizes rendered ESPN picks and sends them through extension messaging', async () => {
     const pickRows = [
       'Bijan Robinson / ATL RB R1, P1 - Ritz Blitz',
@@ -59,7 +105,7 @@ QB 2/4 RB 4/8 WR 5/8 TE 3/3 K 1/3 D/ST 1/3`;
     await messageSent;
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(sentMessage?.type).toBe('FOURTH_DOWN_OBSERVATION');
-    expect(sentMessage?.snapshot.externalDraftId).toBe('extension-789');
+    expect(sentMessage?.snapshot.externalDraftId).toMatch(/^extension-789:run:page-/);
     expect(sentMessage?.snapshot.teamCount).toBe(8);
     expect(sentMessage?.snapshot.picks.map((pick) => pick.playerName)).toEqual(['Bijan Robinson', 'Puka Nacua']);
     expect(sentMessage?.snapshot.leagueSettings?.roster).toEqual(expect.objectContaining({ QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 2, K: 1, DST: 1, BENCH: 6 }));

@@ -160,19 +160,33 @@ export class BrowserController {
   }
 
   async ingestTabBridge(input: TabBridgeObservation) {
+    const observedAtMs = Date.parse(input.observedAt);
+    if (!Number.isFinite(observedAtMs) || observedAtMs > Date.now() + 5_000) {
+      throw Object.assign(new Error('ESPN observation timestamp is invalid or too far in the future'), { statusCode: 422, code: 'OBSERVATION_TIME_INVALID' });
+    }
+    const facts = { picks: input.picks, players: input.players, catalogPlayerCount: input.catalogPlayerCount };
+    const digest = createHash('sha256').update(JSON.stringify(facts)).digest('hex');
+    const observation: RawObservation = {
+      mechanism: 'structured', kind: 'full_snapshot', adapterSchemaVersion: 'espn-tab-bridge-v2',
+      externalDraftId: input.externalDraftId, observedAt: input.observedAt,
+      dedupeKey: `tab-bridge:v2:${input.externalDraftId}:${digest}`, payload: facts,
+    };
+    const active = this.repository.getActiveSession();
+    const latestApplicableAt = active.external_draft_id === input.externalDraftId
+      ? this.repository.latestApplicableObservationAt(active.id)
+      : null;
+    if (latestApplicableAt && observedAtMs < Date.parse(latestApplicableAt)) {
+      await this.handleObservation(observation);
+      this.onChanged('tab.bridge.observed');
+      return this.health();
+    }
     this.repository.activateObservedSession({
       externalDraftId: input.externalDraftId, name: 'ESPN observed draft', teamCount: input.teamCount,
       rounds: input.rounds, userSlot: input.userSlot ? Math.min(input.userSlot, input.teamCount) : undefined,
       roster: input.leagueSettings?.roster, positionLimits: input.leagueSettings?.positionLimits, replace: true,
     });
     this.auth = 'authenticated'; this.detected = true; this.attached = true; this.state = 'observing'; this.capture = 'healthy';
-    const facts = { picks: input.picks, players: input.players };
-    const digest = createHash('sha256').update(JSON.stringify(facts)).digest('hex');
-    await this.handleObservation({
-      mechanism: 'structured', kind: 'full_snapshot', adapterSchemaVersion: 'espn-tab-bridge-v2',
-      externalDraftId: input.externalDraftId, observedAt: input.observedAt,
-      dedupeKey: `tab-bridge:v2:${input.externalDraftId}:${digest}`, payload: facts,
-    });
+    await this.handleObservation(observation);
     this.onChanged('tab.bridge.observed');
     return this.health();
   }
@@ -180,14 +194,51 @@ export class BrowserController {
   private async handleObservation(observation: RawObservation, authorityOverride?: Authority) {
     const session = this.repository.getActiveSession();
     const normalized = this.adapter.normalize(observation);
+    const latestApplicableAt = this.repository.latestApplicableObservationAt(session.id);
+    const observedAtMs = Date.parse(observation.observedAt);
+    const latestApplicableAtMs = latestApplicableAt ? Date.parse(latestApplicableAt) : Number.NEGATIVE_INFINITY;
+    const stale = Number.isFinite(latestApplicableAtMs) && observedAtMs < latestApplicableAtMs;
     const recorded = this.repository.recordObservation({
       sessionId: session.id, mechanism: observation.mechanism, kind: observation.kind,
       adapterSchemaVersion: observation.adapterSchemaVersion, externalDraftId: observation.externalDraftId,
-      dedupeKey: observation.dedupeKey, payload: normalized.observation.payload, parseStatus: normalized.picks.length || normalized.players.length ? 'NORMALIZED' : 'QUARANTINED',
+      observedAt: observation.observedAt, dedupeKey: observation.dedupeKey, payload: normalized.observation.payload,
+      parseStatus: stale ? 'STALE' : normalized.picks.length || normalized.players.length ? 'NORMALIZED' : 'QUARANTINED',
     });
+    if (stale) {
+      this.onChanged('espn.observation.stale');
+      return;
+    }
     this.lastObservationAt = recorded.observedAt;
-    this.repository.upsertObservedPlayers(normalized.players);
+    if (!normalized.picks.length && !normalized.players.length) {
+      this.capture = 'degraded';
+      this.onChanged('espn.observed.quarantined');
+      return;
+    }
+    const catalogPlayerCount = (observation.payload as { catalogPlayerCount?: unknown }).catalogPlayerCount;
+    this.repository.upsertObservedPlayers(normalized.players, 'espn', typeof catalogPlayerCount === 'number' ? catalogPlayerCount : 0);
     let currentRevision = this.repository.getActiveSession().revision;
+    const authority = authorityOverride ?? (observation.mechanism === 'structured' || observation.mechanism === 'websocket' ? 'structured' : 'dom');
+    if (observation.kind === 'full_snapshot') {
+      const resolved = normalized.picks.map((pick) => ({
+        pick,
+        player: this.repository.resolvePlayer({ source: 'espn', externalId: pick.externalPlayerId, name: pick.playerName }),
+      }));
+      if (resolved.some((entry) => !entry.player)) {
+        this.capture = 'degraded';
+        this.onChanged('espn.observed.unresolved');
+        return;
+      }
+      const result = this.repository.reconcileFullSnapshot({
+        commandId: `full:${observation.dedupeKey}`.slice(0, 128), expectedRevision: currentRevision,
+        picks: resolved.map(({ pick, player }) => ({ overallPick: pick.overallPick, playerId: player!.id, authority, reason: `Observed through ${observation.mechanism}` })),
+      }) as { changed?: boolean; incomplete?: boolean; conflicts?: number };
+      if (!result.incomplete && !result.conflicts) {
+        this.capture = 'healthy';
+        this.lastReconciledAt = new Date().toISOString();
+      } else this.capture = 'degraded';
+      this.onChanged(!result.incomplete && !result.conflicts ? 'espn.reconciled' : 'espn.observed.conflict');
+      return;
+    }
     const persisted = new Map(this.repository.listPicks(session.id).map((pick) => [pick.overallPick, pick.playerId]));
     const applied: ObservationPick[] = [];
     let confirmed = 0;
@@ -198,7 +249,7 @@ export class BrowserController {
       const result = this.repository.applyPick({
         commandId: `${observation.dedupeKey}:${pick.overallPick}`.slice(0, 128), expectedRevision: currentRevision,
         playerId: player.id, overallPick: pick.overallPick,
-        authority: authorityOverride ?? (observation.mechanism === 'structured' || observation.mechanism === 'websocket' ? 'structured' : 'dom'),
+        authority,
         reason: `Observed through ${observation.mechanism}`,
       }) as { revision: number; conflict?: boolean };
       currentRevision = result.revision;

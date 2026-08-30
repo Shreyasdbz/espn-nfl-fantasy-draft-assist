@@ -8,7 +8,7 @@ export const ALGORITHM_VERSION = 'league-market-v3';
 export type Strategy = {
   reliabilityWeight: number; upsideWeight: number; valueWeight: number; scarcityWeight: number;
   rosterFitWeight: number; tierWeight: number; marketWeight: number; replacementWeight: number;
-  evidenceWeight: number; riskWeight: number; byeWeight: number;
+  projectionWeight: number; evidenceWeight: number; riskWeight: number; byeWeight: number;
 };
 export type RosterRules = ContractRosterRules;
 export type PositionLimits = ContractPositionLimits;
@@ -23,7 +23,7 @@ export type RosterContext = {
 export const defaultStrategy: Strategy = {
   reliabilityWeight: 0.12, upsideWeight: 0.13, valueWeight: 0.14, scarcityWeight: 0.09,
   rosterFitWeight: 0.13, tierWeight: 0.08, marketWeight: 0.11, replacementWeight: 0.11,
-  evidenceWeight: 0.06, riskWeight: 0.08, byeWeight: 0.03,
+  projectionWeight: 0.1, evidenceWeight: 0.06, riskWeight: 0.08, byeWeight: 0.03,
 };
 export const defaultRosterRules: RosterRules = { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 2, K: 1, DST: 1, BENCH: 6 };
 export const defaultPositionLimits: PositionLimits = { QB: 4, RB: 8, WR: 8, TE: 3, K: 3, DST: 3 };
@@ -45,6 +45,20 @@ function normalizedLimits(input?: Partial<PositionLimits>): PositionLimits {
 }
 function totalRosterSize(rules: RosterRules): number { return rules.QB + rules.RB + rules.WR + rules.TE + rules.FLEX + rules.K + rules.DST + rules.BENCH; }
 function canFillOpenSlot(position: Position, openSlots: RosterRules): boolean { return openSlots[position] > 0 || (flexPositions.has(position) && openSlots.FLEX > 0); }
+function uniqueCatalog(players: Player[]): Player[] {
+  const byId = new Map<string, Player>();
+  for (const player of players) {
+    const existing = byId.get(player.id);
+    if (!existing || player.updatedAt > existing.updatedAt
+      || (player.updatedAt === existing.updatedAt && player.overallRank < existing.overallRank)
+      || (player.updatedAt === existing.updatedAt && player.overallRank === existing.overallRank && player.name.localeCompare(existing.name) < 0)) byId.set(player.id, player);
+  }
+  return [...byId.values()];
+}
+function knownInactive(player: Player): boolean {
+  const status = player.intelligence?.rosterStatus?.trim().toUpperCase();
+  return !!status && ['CUT', 'RELEASED', 'RETIRED', 'RET', 'SUSPENDED', 'INACTIVE'].includes(status);
+}
 
 export function analyzeRosterConstruction(input: { picks: DraftPick[]; userSlot: number; rosterRules?: Partial<RosterRules>; positionLimits?: Partial<PositionLimits> }): RosterContext {
   const rules = normalizedRules(input.rosterRules);
@@ -82,16 +96,17 @@ export function analyzeRosterConstruction(input: { picks: DraftPick[]; userSlot:
 function dynamicStrategy(baseInput: Partial<Strategy> | undefined, context: RosterContext): Strategy {
   const base = { ...defaultStrategy, ...baseInput };
   const multipliers = context.gate === 'forced-needs'
-    ? [0.7, 0.45, 0.4, 0.65, 4.5, 0.45, 0.5, 0.65, 0.8, 0.8, 0.8]
-    : context.phase === 'foundation' ? [1, 1.2, 1.1, 1.05, 0.9, 1.2, 0.95, 1.15, 0.9, 0.8, 0.35]
-      : context.phase === 'balance' ? [1.05, 1, 0.9, 1.05, 1.7, 1, 1.2, 1.1, 1, 1, 0.7]
-        : [1.1, 0.75, 0.6, 0.9, 2.7, 0.7, 1, 0.9, 1.1, 0.95, 1];
+    ? [0.7, 0.45, 0.4, 0.65, 4.5, 0.45, 0.5, 0.65, 0.8, 0.8, 0.8, 0.8]
+    : context.phase === 'foundation' ? [1, 1.2, 1.1, 1.05, 0.9, 1.2, 0.95, 1.15, 1.1, 0.9, 0.8, 0.35]
+      : context.phase === 'balance' ? [1.05, 1, 0.9, 1.05, 1.7, 1, 1.2, 1.1, 1, 1, 1, 0.7]
+        : [1.1, 0.75, 0.6, 0.9, 2.7, 0.7, 1, 0.9, 0.9, 1.1, 0.95, 1];
   return {
     reliabilityWeight: base.reliabilityWeight * multipliers[0]!, upsideWeight: base.upsideWeight * multipliers[1]!,
     valueWeight: base.valueWeight * multipliers[2]!, scarcityWeight: base.scarcityWeight * multipliers[3]!,
     rosterFitWeight: base.rosterFitWeight * multipliers[4]!, tierWeight: base.tierWeight * multipliers[5]!,
     marketWeight: base.marketWeight * multipliers[6]!, replacementWeight: base.replacementWeight * multipliers[7]!,
-    evidenceWeight: base.evidenceWeight * multipliers[8]!, riskWeight: base.riskWeight * multipliers[9]!, byeWeight: base.byeWeight * multipliers[10]!,
+    projectionWeight: base.projectionWeight * multipliers[8]!, evidenceWeight: base.evidenceWeight * multipliers[9]!,
+    riskWeight: base.riskWeight * multipliers[10]!, byeWeight: base.byeWeight * multipliers[11]!,
   };
 }
 
@@ -126,11 +141,16 @@ export function analyzeDraftMarket(input: {
   nextUserPick: number | null; rosterRules?: Partial<RosterRules>; positionLimits?: Partial<PositionLimits>;
 }): MarketSignal[] {
   const rules = normalizedRules(input.rosterRules); const limits = normalizedLimits(input.positionLimits);
-  const drafted = new Set(input.picks.map((pick) => pick.playerId));
-  const available = input.players.filter((player) => !drafted.has(player.id) && !player.excluded);
-  const recent = input.picks.slice(-Math.max(6, input.teamCount));
+  const orderedPicks = [...input.picks].sort((left, right) => left.overallPick - right.overallPick);
+  const drafted = new Set(orderedPicks.map((pick) => pick.playerId));
+  const catalog = uniqueCatalog(input.players);
+  const available = catalog.filter((player) => !drafted.has(player.id) && !player.excluded && !knownInactive(player));
+  const recent = orderedPicks.slice(-Math.max(6, input.teamCount));
   const nextPick = input.nextUserPick ?? input.currentOverallPick;
-  const upcomingSlots = Array.from({ length: Math.max(0, nextPick - input.currentOverallPick) }, (_, index) => snakeSlot(input.currentOverallPick + index, input.teamCount)).filter((slot) => slot !== input.userSlot);
+  const upcomingTurns = Array.from({ length: Math.max(0, nextPick - input.currentOverallPick) }, (_, index) => {
+    const overallPick = input.currentOverallPick + index;
+    return { overallPick, slot: snakeSlot(overallPick, input.teamCount) };
+  }).filter((turn) => turn.slot !== input.userSlot);
   const demandTargets = Object.fromEntries(positions.map((position) => [position, depthTarget(position, rules, limits)])) as Record<Position, number>;
   const totalTarget = positions.reduce((sum, position) => sum + demandTargets[position], 0);
   return positions.map((position) => {
@@ -138,17 +158,33 @@ export function analyzeDraftMarket(input: {
     const recentPicks = recent.filter((pick) => pick.position === position).length;
     const expected = recent.length * demandTargets[position] / Math.max(1, totalTarget);
     const runIntensity = clamp((recentPicks - expected) / Math.max(1, expected * 1.4));
-    const upcomingDemand = upcomingSlots.length ? clamp(upcomingSlots.reduce((sum, slot) => sum + demandForPosition(input.picks, slot, position, rules, limits), 0) / upcomingSlots.length) : 0;
+    const simulatedPicks = [...orderedPicks];
+    let demandSum = 0;
+    for (const turn of upcomingTurns) {
+      const demand = demandForPosition(simulatedPicks, turn.slot, position, rules, limits);
+      demandSum += demand;
+      if (demand > 0) {
+        simulatedPicks.push({
+          overallPick: turn.overallPick, round: Math.ceil(turn.overallPick / input.teamCount),
+          pickInRound: ((turn.overallPick - 1) % input.teamCount) + 1, draftingSlot: turn.slot,
+          playerId: `market:${position}:${turn.overallPick}`, playerName: `Modeled ${position} demand`,
+          position, team: null, authority: 'snapshot', lockedManual: false, selectedAt: 'modeled',
+        });
+      }
+    }
+    const upcomingDemand = upcomingTurns.length ? clamp(demandSum / upcomingTurns.length) : 0;
     const best = pool[0]; const availableInTier = best ? pool.filter((player) => player.tier === best.tier).length : 0;
-    const postRunIndex = Math.min(pool.length - 1, Math.max(1, Math.ceil(upcomingSlots.length * Math.max(0, upcomingDemand))));
+    const postRunIndex = Math.max(1, Math.ceil(upcomingTurns.length * Math.max(0, upcomingDemand)));
     const bestQuality = best ? playerQuality(best, input.players.length) : 0;
     const laterQuality = pool[postRunIndex] ? playerQuality(pool[postRunIndex]!, input.players.length) : 0;
     const tierDrop = round(Math.max(0, (bestQuality - laterQuality) * 100), 1);
-    const cliff = clamp(tierDrop / 18, 0, 1); const supplyRelief = availableInTier >= Math.max(3, upcomingSlots.length + 1) ? 0.3 : 0;
-    const rawPressure = clamp(runIntensity * 0.38 + upcomingDemand * 0.37 + cliff * 0.25 - supplyRelief);
-    const pressure = round(upcomingSlots.length > 0 && upcomingDemand <= -0.75 ? Math.min(-0.25, rawPressure) : rawPressure, 4);
+    const cliff = clamp(tierDrop / 18, 0, 1); const supplyRelief = availableInTier >= Math.max(3, upcomingTurns.length + 1) ? 0.3 : 0;
+    const rawPressure = upcomingDemand <= 0
+      ? Math.min(0, clamp(upcomingDemand * 0.7 - supplyRelief))
+      : clamp(runIntensity * 0.38 + upcomingDemand * 0.37 + cliff * 0.25 - supplyRelief);
+    const pressure = round(upcomingTurns.length > 0 && upcomingDemand <= -0.75 ? Math.min(-0.25, rawPressure) : rawPressure, 4);
     const label: MarketSignal['label'] = pressure >= 0.62 ? 'run' : pressure >= 0.3 ? 'watch' : pressure <= -0.2 ? 'cool' : 'stable';
-    const detail = upcomingSlots.length ? `${recentPicks} of the last ${recent.length} picks; ${upcomingSlots.length} opponent pick${upcomingSlots.length === 1 ? '' : 's'} before your turn; ${availableInTier} left in the top available tier.` : `${recentPicks} of the last ${recent.length} picks; you are on the clock; ${availableInTier} left in the top available tier.`;
+    const detail = upcomingTurns.length ? `${recentPicks} of the last ${recent.length} picks; ${upcomingTurns.length} opponent pick${upcomingTurns.length === 1 ? '' : 's'} before your turn; ${availableInTier} left in the top available tier.` : `${recentPicks} of the last ${recent.length} picks; you are on the clock; ${availableInTier} left in the top available tier.`;
     return { position, recentPicks, upcomingDemand: round(upcomingDemand, 4), availableInTier, tierDrop, pressure, label, detail };
   });
 }
@@ -164,12 +200,19 @@ export function recommendPlayers(input: {
 }): Recommendation[] {
   const rules = normalizedRules(input.rosterRules); const limits = normalizedLimits(input.positionLimits);
   const teamCount = input.teamCount ?? Math.max(2, ...input.picks.map((pick) => pick.draftingSlot), 10);
+  if (input.nextUserPick === null) return [];
   const context = analyzeRecommendationContext({ ...input, teamCount, rosterRules: rules, positionLimits: limits });
   const strategy = dynamicStrategy(input.strategy, context); const draftedIds = new Set(input.picks.map((pick) => pick.playerId));
   const roster = input.picks.filter((pick) => pick.draftingSlot === input.userSlot);
-  const available = input.players.filter((player) => !draftedIds.has(player.id) && !player.excluded);
+  const catalog = uniqueCatalog(input.players);
+  const available = catalog.filter((player) => !draftedIds.has(player.id) && !player.excluded && !knownInactive(player));
   const quality = new Map(available.map((player) => [player.id, playerQuality(player, input.players.length)]));
   const positionPools = new Map(positions.map((position) => [position, available.filter((player) => player.position === position).sort((a, b) => (quality.get(b.id) ?? 0) - (quality.get(a.id) ?? 0))]));
+  const projectionRanges = new Map(positions.map((position) => {
+    const projections = (positionPools.get(position) ?? []).map((player) => player.projection).filter(Number.isFinite);
+    return [position, { minimum: Math.min(...projections, 0), maximum: Math.max(...projections, 0) }] as const;
+  }));
+  const catalogAsOf = Math.max(Date.now(), ...catalog.map((player) => new Date(player.updatedAt).getTime()).filter(Number.isFinite), 0);
   const byes = new Map<number, number>();
   for (const pick of roster) if (pick.position !== 'K' && pick.position !== 'DST' && pick.team) { const player = input.players.find((candidate) => candidate.id === pick.playerId); if (player?.byeWeek) byes.set(player.byeWeek, (byes.get(player.byeWeek) ?? 0) + 1); }
   const specialTeamsWindow = context.picksRemaining <= 4 || context.gate === 'forced-needs';
@@ -177,6 +220,7 @@ export function recommendPlayers(input: {
   const signals = new Map(context.marketSignals.map((signal) => [signal.position, signal]));
   return available.filter((player) => {
     if (context.picksRemaining === 0) return false;
+    if ((player.position === 'K' && rules.K === 0) || (player.position === 'DST' && rules.DST === 0)) return false;
     if ((player.position === 'K' || player.position === 'DST') && !specialTeamsWindow) return false;
     if (context.positionCounts[player.position] >= limits[player.position]) return false;
     if (context.gate === 'forced-needs' && !required.has(player.position)) return false;
@@ -195,7 +239,12 @@ export function recommendPlayers(input: {
     const market = signals.get(player.position)!; const needMultiplier = rosterNorm >= 0.6 ? 1 : rosterNorm >= 0 ? 0.55 : 0.2; const marketNorm = clamp(market.pressure * needMultiplier);
     const pool = positionPools.get(player.position) ?? []; const replacement = pool[Math.min(pool.length - 1, Math.max(1, Math.ceil(replacementRank[player.position] / Math.max(1, teamCount))))];
     const replacementRaw = ((quality.get(player.id) ?? 0) - (replacement ? quality.get(replacement.id) ?? 0 : 0)) * 100; const replacementNorm = clamp(replacementRaw / 35, 0, 1);
-    const evidenceNorm = player.intelligence?.dataQuality === 'strong' ? 1 : player.intelligence?.dataQuality === 'partial' ? 0.45 : player.intelligence ? -0.15 : -0.45;
+    const projectionRange = projectionRanges.get(player.position)!;
+    const projectionNorm = projectionRange.maximum > projectionRange.minimum ? clamp((player.projection - projectionRange.minimum) / (projectionRange.maximum - projectionRange.minimum), 0, 1) : 0;
+    const profileAt = player.intelligence ? new Date(player.intelligence.researchedAt).getTime() : 0;
+    const profileAgeDays = profileAt && catalogAsOf ? Math.max(0, (catalogAsOf - profileAt) / 86_400_000) : Number.POSITIVE_INFINITY;
+    const staleProfile = profileAgeDays > 180;
+    const evidenceNorm = staleProfile ? -0.45 : player.intelligence?.dataQuality === 'strong' ? 1 : player.intelligence?.dataQuality === 'partial' ? 0.45 : player.intelligence ? -0.15 : -0.45;
     const factors = [
       factor('reliability', 'Reliability', effectiveReliability, effectiveReliability / 100, strategy.reliabilityWeight, player.intelligence ? `${round(effectiveReliability)} position-specific floor score from weekly production and role stability` : `${round(effectiveReliability)} workbook reliability index`),
       factor('upside', 'Upside', effectiveUpside, effectiveUpside / 100, strategy.upsideWeight, player.intelligence ? `${round(effectiveUpside)} ceiling score; late-season delta ${player.intelligence.trendScore && player.intelligence.trendScore > 0 ? '+' : ''}${round(player.intelligence.trendScore ?? 0, 1)} PPG` : `${round(effectiveUpside)} upside index`),
@@ -205,7 +254,10 @@ export function recommendPlayers(input: {
       factor('tier', 'Tier leverage', player.tier, tierNorm, strategy.tierWeight, `Tier ${player.tier}; ${market.availableInTier} player${market.availableInTier === 1 ? '' : 's'} remain in the top available ${player.position} tier`),
       factor('market', 'Draft market', market.pressure, marketNorm, strategy.marketWeight, market.detail),
       factor('replacement', 'Value over replacement', replacementRaw, replacementNorm, strategy.replacementWeight, `${round(replacementRaw, 1)} quality points above the next ${player.position} replacement band`),
-      factor('evidence', 'Evidence quality', player.intelligence?.sourceCount ?? 0, evidenceNorm, strategy.evidenceWeight, player.intelligence ? `${player.intelligence.dataQuality} profile across ${player.intelligence.sourceCount} evidence sources` : 'No current usage profile; rank inputs carry more uncertainty'),
+      factor('projection', 'Full-PPR projection', player.projection, projectionNorm, strategy.projectionWeight, `${round(player.projection, 1)} projected full-PPR points relative to available ${player.position}s`),
+      factor('evidence', 'Evidence quality', player.intelligence?.sourceCount ?? 0, evidenceNorm, strategy.evidenceWeight, staleProfile
+        ? `Stale profile last researched ${player.intelligence?.researchedAt ?? 'at an unknown date'}; evidence confidence is reduced`
+        : player.intelligence ? `${player.intelligence.dataQuality} profile across ${player.intelligence.sourceCount} evidence sources` : 'No current usage profile; rank inputs carry more uncertainty'),
       factor('risk', 'Risk', player.risk, -(player.risk / 100), strategy.riskWeight, `${round(player.risk)} risk index`),
       factor('bye', 'Bye coverage', byeOverlap, byeNorm, strategy.byeWeight, player.byeWeek ? `${byeOverlap} roster overlap in week ${player.byeWeek}` : 'Bye week unknown'),
     ];
@@ -218,8 +270,9 @@ export function recommendPlayers(input: {
     if (byeOverlap >= 2) warnings.push(`Week ${player.byeWeek} roster overlap`); if (rosterNorm < 0) warnings.push(`${player.position} depth already satisfied`); if (market.label === 'run') warnings.push(`${player.position} run: tier may not survive`);
     if (context.gate === 'forced-needs') warnings.push('Mandatory roster completion gate'); if (player.source.startsWith('ESPN passive')) warnings.push('ESPN identity is fresh; recommendation calibration is provisional');
     if (!player.intelligence) warnings.push('No current usage profile'); if (player.intelligence?.priorTeam && player.intelligence.currentTeam && player.intelligence.priorTeam !== player.intelligence.currentTeam) warnings.push('Changed teams for 2026');
+    if (staleProfile) warnings.push('Player profile is stale');
     return { player, score, factors, survivalBand, warnings, rosterNorm, market };
-  }).sort((a, b) => b.score - a.score || a.player.overallRank - b.player.overallRank).slice(0, input.limit ?? 12).map((entry, index, all) => {
+  }).sort((a, b) => b.score - a.score || a.player.overallRank - b.player.overallRank || a.player.id.localeCompare(b.player.id)).slice(0, input.limit ?? 12).map((entry, index, all) => {
     const differentiators = [...entry.factors].sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution)).slice(0, 2); const alternative = all[index + 1]?.player.name;
     const rosterLead = entry.rosterNorm >= 0.75 ? `${entry.factors.find((item) => item.key === 'roster')!.detail}. ` : '';
     const marketLead = entry.market.label === 'run' ? `${entry.player.position} demand is accelerating, but the boost is capped by roster need and tier value. ` : '';

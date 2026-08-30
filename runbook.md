@@ -210,6 +210,18 @@ and writes desktop/mobile screenshots to
 `/tmp/fourth-down-visual-validation`. It never opens ESPN or touches the
 signed-in Chrome profile.
 
+For the failure-oriented UI matrix (six draft/connection states across four
+viewports, with interaction checks and screenshots):
+
+```bash
+pnpm app:validate:red-team-ui
+```
+
+This uses mocked responses in an isolated headless browser page. It reads the
+active catalog as a baseline but does not write to the database or touch the
+signed-in ESPN Chrome session. Screenshots are written to
+`/tmp/fourth-down-red-team/`.
+
 ### Database backup without stopping
 
 ```bash

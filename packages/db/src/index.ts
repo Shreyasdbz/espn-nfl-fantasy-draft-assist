@@ -210,9 +210,16 @@ export class DraftRepository {
           source: input.roster || input.positionLimits ? 'espn-observed-exact' : canPreserve ? priorConfig?.source ?? 'espn-observed' : 'espn-observed',
         };
         const json = JSON.stringify(config);
-        leagueConfigVersionId = `league-espn-${checksum(json).slice(0, 16)}`;
-        this.sqlite.prepare('INSERT OR IGNORE INTO league_config_versions VALUES (?, ?, ?, ?, ?, ?)')
-          .run(leagueConfigVersionId, `${input.teamCount}-team ESPN observed`, 1, json, checksum(json), createdAt);
+        const configChecksum = checksum(json);
+        const priorVersion = this.sqlite.prepare('SELECT id FROM league_config_versions WHERE checksum=? LIMIT 1').get(configChecksum) as { id: string } | undefined;
+        if (priorVersion) leagueConfigVersionId = priorVersion.id;
+        else {
+          const configName = `${input.teamCount}-team ESPN observed`;
+          const nextVersion = (this.sqlite.prepare('SELECT COALESCE(MAX(version),0)+1 AS version FROM league_config_versions WHERE name=?').get(configName) as { version: number }).version;
+          leagueConfigVersionId = `league-espn-${configChecksum.slice(0, 16)}`;
+          this.sqlite.prepare('INSERT INTO league_config_versions VALUES (?, ?, ?, ?, ?, ?)')
+            .run(leagueConfigVersionId, configName, nextVersion, json, configChecksum, createdAt);
+        }
       }
       const existing = input.externalDraftId
         ? this.sqlite.prepare("SELECT * FROM draft_sessions WHERE external_platform='espn' AND external_draft_id=? AND state<>'DELETED'").get(input.externalDraftId) as SessionRow | undefined
@@ -442,13 +449,19 @@ export class DraftRepository {
     const config = this.configFor(session);
     const players = this.listPlayers().filter((player) => !player.excluded);
     const picks = this.listPicks(session.id, config.teamCount);
-    const currentOverallPick = Math.min(config.teamCount * config.rounds, (picks.at(-1)?.overallPick ?? 0) + 1);
+    const draftSize = config.teamCount * config.rounds;
+    const pickedNumbers = new Set(picks.map((pick) => pick.overallPick));
+    let currentOverallPick = 1;
+    while (currentOverallPick <= draftSize && pickedNumbers.has(currentOverallPick)) currentOverallPick += 1;
+    currentOverallPick = Math.min(draftSize, currentOverallPick);
     const nextUserPick = nextPickForSlot(currentOverallPick - 1, config.teamCount, config.rounds, session.user_slot);
     const recommendationContext = analyzeRecommendationContext({ players, picks, userSlot: session.user_slot, teamCount: config.teamCount, currentOverallPick, nextUserPick, rosterRules: config.roster, positionLimits: config.positionLimits });
     const recommendations = recommendPlayers({ players, picks, userSlot: session.user_slot, teamCount: config.teamCount, currentOverallPick, nextUserPick, rosterRules: config.roster, positionLimits: config.positionLimits, strategy: this.strategyFor(session) });
     const drafted = new Set(picks.map((pick) => pick.playerId));
     const conflicts = this.sqlite.prepare("SELECT id, overall_pick, candidate_json FROM reconciliation_conflicts WHERE session_id = ? AND status = 'OPEN'").all(session.id) as Array<{ id: string; overall_pick: number; candidate_json: string }>;
-    const operation = this.sqlite.prepare("SELECT id, operation_type FROM operations WHERE state = 'COMPLETED' ORDER BY created_at DESC LIMIT 1").get() as { id: string; operation_type: string } | undefined;
+    const operation = session.parent_session_id
+      ? this.sqlite.prepare("SELECT id, operation_type FROM operations WHERE state='COMPLETED' AND operation_type='RESET_SESSION' AND target_id=? ORDER BY created_at DESC LIMIT 1").get(session.parent_session_id) as { id: string; operation_type: string } | undefined
+      : undefined;
     return {
       environment: this.getDraftEnvironment(),
       session: {
@@ -471,6 +484,90 @@ export class DraftRepository {
   private idempotent(commandId: string): unknown | null {
     const prior = this.sqlite.prepare('SELECT result_json FROM command_results WHERE command_id = ?').get(commandId) as { result_json: string } | undefined;
     return prior ? JSON.parse(prior.result_json) : null;
+  }
+
+  reconcileFullSnapshot(input: { commandId: string; expectedRevision: number; picks: Array<{ overallPick: number; playerId: string; authority: Authority; reason?: string }> }) {
+    const prior = this.idempotent(input.commandId);
+    if (prior) return prior;
+    return this.sqlite.transaction(() => {
+      const session = this.getActiveSession();
+      assertExpectedRevision(input.expectedRevision, session.revision);
+      const config = this.configFor(session);
+      const draftSize = config.teamCount * config.rounds;
+      const ordered = [...input.picks].sort((left, right) => left.overallPick - right.overallPick);
+      const pickNumbers = new Set<number>();
+      const playerIds = new Set<string>();
+      for (const pick of ordered) {
+        if (pick.overallPick < 1 || pick.overallPick > draftSize || pickNumbers.has(pick.overallPick) || playerIds.has(pick.playerId)) {
+          throw Object.assign(new Error('Full ESPN snapshot contains duplicate or invalid pick facts'), { statusCode: 409, code: 'SNAPSHOT_INVALID' });
+        }
+        pickNumbers.add(pick.overallPick); playerIds.add(pick.playerId);
+      }
+      const existing = this.sqlite.prepare('SELECT * FROM draft_picks WHERE session_id=? ORDER BY overall_pick').all(session.id) as PickRow[];
+      const maxIncoming = ordered.at(-1)?.overallPick ?? 0;
+      const maxExisting = existing.at(-1)?.overall_pick ?? 0;
+      const contiguous = ordered.every((pick, index) => pick.overallPick === index + 1);
+      if (!contiguous || maxIncoming < maxExisting) {
+        const createdAt = now();
+        const candidateJson = JSON.stringify({ summary: 'Full ESPN snapshot is incomplete or shorter than the preserved board', maxIncoming, maxExisting });
+        const priorConflict = this.sqlite.prepare("SELECT id FROM reconciliation_conflicts WHERE session_id=? AND overall_pick=? AND candidate_json=? AND status='OPEN' LIMIT 1").get(session.id, Math.max(1, maxIncoming + 1), candidateJson);
+        if (!priorConflict) this.sqlite.prepare('INSERT INTO reconciliation_conflicts VALUES (?,?,?,?,?,?)').run(randomUUID(), session.id, Math.max(1, maxIncoming + 1), candidateJson, 'OPEN', createdAt);
+        const result = { sessionId: session.id, revision: session.revision, changed: false, incomplete: true, conflicts: 1 };
+        this.sqlite.prepare('INSERT INTO command_results VALUES (?,?,?,?)').run(input.commandId, session.id, JSON.stringify(result), createdAt);
+        return result;
+      }
+
+      const existingByPick = new Map(existing.map((pick) => [pick.overall_pick, pick]));
+      const manualByPick = new Map(existing.filter((pick) => pick.locked_manual === 1).map((pick) => [pick.overall_pick, pick]));
+      const manualByPlayer = new Map(existing.filter((pick) => pick.locked_manual === 1).map((pick) => [pick.player_id, pick]));
+      const accepted: typeof ordered = [];
+      let conflicts = 0;
+      const createdAt = now();
+      for (const pick of ordered) {
+        const manualAtPick = manualByPick.get(pick.overallPick);
+        const manualForPlayer = manualByPlayer.get(pick.playerId);
+        if ((manualAtPick && manualAtPick.player_id !== pick.playerId) || (manualForPlayer && manualForPlayer.overall_pick !== pick.overallPick)) {
+          const candidateJson = JSON.stringify({ summary: 'Automated full snapshot conflicts with a manual lock', playerId: pick.playerId });
+          const conflictPick = manualForPlayer?.overall_pick ?? pick.overallPick;
+          const priorConflict = this.sqlite.prepare("SELECT id FROM reconciliation_conflicts WHERE session_id=? AND overall_pick=? AND candidate_json=? AND status='OPEN' LIMIT 1").get(session.id, conflictPick, candidateJson);
+          if (!priorConflict) this.sqlite.prepare('INSERT INTO reconciliation_conflicts VALUES (?,?,?,?,?,?)').run(randomUUID(), session.id, conflictPick, candidateJson, 'OPEN', createdAt);
+          conflicts += 1;
+          continue;
+        }
+        if (!manualAtPick) accepted.push(pick);
+      }
+      const currentAutomated = existing.filter((pick) => pick.locked_manual === 0);
+      const unchanged = conflicts === 0 && currentAutomated.length === accepted.length
+        && accepted.every((pick) => existingByPick.get(pick.overallPick)?.player_id === pick.playerId);
+      if (unchanged) {
+        const result = { sessionId: session.id, revision: session.revision, changed: false, confirmed: ordered.length, conflicts: 0 };
+        this.sqlite.prepare('INSERT INTO command_results VALUES (?,?,?,?)').run(input.commandId, session.id, JSON.stringify(result), createdAt);
+        return result;
+      }
+
+      this.sqlite.prepare('DELETE FROM draft_picks WHERE session_id=? AND locked_manual=0').run(session.id);
+      for (const pick of accepted) {
+        const priorPick = existingByPick.get(pick.overallPick);
+        let revisionId = priorPick?.player_id === pick.playerId ? priorPick.accepted_revision_id : null;
+        if (!revisionId) {
+          revisionId = randomUUID();
+          this.sqlite.prepare(`INSERT INTO pick_revisions(id,session_id,overall_pick,player_id,drafting_slot,authority,action,supersedes_revision_id,reason,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)`).run(revisionId, session.id, pick.overallPick, pick.playerId, pickCoordinates(pick.overallPick, config.teamCount).draftingSlot,
+            pick.authority, priorPick ? 'CORRECT' : 'ADD', priorPick?.accepted_revision_id ?? null, pick.reason ?? 'Observed full ESPN snapshot', createdAt);
+        }
+        this.sqlite.prepare('INSERT INTO draft_picks VALUES (?,?,?,?,?,?,?,?,?)').run(
+          session.id, pick.overallPick, pick.playerId, pickCoordinates(pick.overallPick, config.teamCount).draftingSlot,
+          pick.authority, 0, revisionId, priorPick?.player_id === pick.playerId ? priorPick.revision : (priorPick?.revision ?? 0) + 1, createdAt,
+        );
+      }
+      const nextRevision = session.revision + 1;
+      this.sqlite.prepare("UPDATE draft_sessions SET state='ACTIVE', revision=? WHERE id=?").run(nextRevision, session.id);
+      const result = { sessionId: session.id, revision: nextRevision, changed: true, confirmed: ordered.length - conflicts, conflicts };
+      this.sqlite.prepare('INSERT INTO command_results VALUES (?,?,?,?)').run(input.commandId, session.id, JSON.stringify(result), createdAt);
+      this.sqlite.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?,?,?,?,?)').run(randomUUID(), 'draft_session', session.id, 'FULL_SNAPSHOT_RECONCILED', input.commandId,
+        JSON.stringify({ pickCount: existing.length }), JSON.stringify(result), 'Atomic full-snapshot reconciliation', createdAt);
+      return result;
+    })();
   }
 
   applyPick(input: { commandId: string; expectedRevision: number; playerId: string; overallPick?: number; authority: Authority; reason?: string }) {
@@ -500,8 +597,12 @@ export class DraftRepository {
           authority, existing ? 'CORRECT' : 'ADD', existing?.accepted_revision_id ?? null, input.reason ?? null, createdAt);
       if (existing) {
         if (existing.locked_manual && authority !== 'manual') {
-          this.sqlite.prepare('INSERT INTO reconciliation_conflicts VALUES (?,?,?,?,?,?)').run(randomUUID(), session.id, overallPick, JSON.stringify({ summary: 'Automated evidence conflicts with a manual lock', playerId: input.playerId }), 'OPEN', createdAt);
-          return { sessionId: session.id, revision: session.revision, conflict: true };
+          const candidateJson = JSON.stringify({ summary: 'Automated evidence conflicts with a manual lock', playerId: input.playerId });
+          const priorConflict = this.sqlite.prepare("SELECT id FROM reconciliation_conflicts WHERE session_id=? AND overall_pick=? AND candidate_json=? AND status='OPEN' LIMIT 1").get(session.id, overallPick, candidateJson);
+          if (!priorConflict) this.sqlite.prepare('INSERT INTO reconciliation_conflicts VALUES (?,?,?,?,?,?)').run(randomUUID(), session.id, overallPick, candidateJson, 'OPEN', createdAt);
+          const result = { sessionId: session.id, revision: session.revision, conflict: true };
+          this.sqlite.prepare('INSERT INTO command_results VALUES (?,?,?,?)').run(input.commandId, session.id, JSON.stringify(result), createdAt);
+          return result;
         }
         this.sqlite.prepare(`UPDATE draft_picks SET player_id=?, drafting_slot=?, authority=?, locked_manual=?, accepted_revision_id=?, revision=revision+1, selected_at=?
           WHERE session_id=? AND overall_pick=?`).run(input.playerId, pickCoordinates(overallPick, config.teamCount).draftingSlot, authority, authority === 'manual' ? 1 : 0, revisionId, createdAt, session.id, overallPick);
@@ -549,6 +650,8 @@ export class DraftRepository {
       const operation = this.sqlite.prepare('SELECT * FROM operations WHERE id = ?').get(operationId) as { id: string; operation_type: string; state: string; result_json: string } | undefined;
       if (!operation || operation.operation_type !== 'RESET_SESSION' || operation.state !== 'COMPLETED') throw Object.assign(new Error('Operation is not undoable'), { statusCode: 409, code: 'NOT_UNDOABLE' });
       const result = JSON.parse(operation.result_json) as { parentId: string; childId: string };
+      const active = this.getActiveSession();
+      if (active.id !== result.childId) throw Object.assign(new Error('Reset undo is available only while its replacement session is active'), { statusCode: 409, code: 'UNDO_SESSION_CHANGED' });
       const createdAt = now();
       this.sqlite.prepare("UPDATE draft_sessions SET state='ARCHIVED', archived_at=? WHERE id=?").run(createdAt, result.childId);
       this.sqlite.prepare("UPDATE draft_sessions SET state='ACTIVE', archived_at=NULL, revision=revision+1 WHERE id=?").run(result.parentId);
@@ -558,8 +661,13 @@ export class DraftRepository {
     })();
   }
 
-  recordObservation(input: { sessionId: string; mechanism: string; kind: string; adapterSchemaVersion: string; externalDraftId?: string; dedupeKey: string; payload: unknown; parseStatus: string }) {
-    const observedAt = now();
+  latestApplicableObservationAt(sessionId: string): string | null {
+    const row = this.sqlite.prepare("SELECT MAX(observed_at) AS observed_at FROM draft_observations WHERE session_id=? AND parse_status = 'NORMALIZED'").get(sessionId) as { observed_at: string | null };
+    return row.observed_at;
+  }
+
+  recordObservation(input: { sessionId: string; mechanism: string; kind: string; adapterSchemaVersion: string; externalDraftId?: string; observedAt?: string; dedupeKey: string; payload: unknown; parseStatus: string }) {
+    const observedAt = input.observedAt ?? now();
     const seq = (this.sqlite.prepare('SELECT COALESCE(MAX(monotonic_seq),0)+1 AS seq FROM draft_observations WHERE session_id=?').get(input.sessionId) as { seq: number }).seq;
     const result = this.sqlite.prepare(`INSERT OR IGNORE INTO draft_observations(
       id,session_id,mechanism,kind,adapter_schema_version,external_draft_id,observed_at,monotonic_seq,dedupe_key,payload_inline,parse_status
@@ -584,7 +692,7 @@ export class DraftRepository {
     return this.rowToPlayer(matches[0]!);
   }
 
-  upsertObservedPlayers(players: ObservationPlayer[], source = 'espn') {
+  upsertObservedPlayers(players: ObservationPlayer[], source = 'espn', catalogPlayerCount = 0) {
     if (!players.length) return { upserted: 0, activatedCatalog: false };
     return this.sqlite.transaction(() => {
       const createdAt = now();
@@ -592,7 +700,9 @@ export class DraftRepository {
       for (const observed of players) {
         const mapped = this.sqlite.prepare(`SELECT p.* FROM external_identities e JOIN players p ON p.id=e.player_id
           WHERE e.source_id=? AND e.namespace='player' AND e.external_id=? AND e.scope_key='season:2026'`).get(source, observed.externalPlayerId) as PlayerRow | undefined;
-        const named = mapped ?? this.sqlite.prepare('SELECT * FROM players WHERE normalized_name=? LIMIT 1').get(normalizePlayerName(observed.playerName)) as PlayerRow | undefined;
+        const nameMatches = mapped ? [] : this.sqlite.prepare('SELECT * FROM players WHERE normalized_name=? ORDER BY excluded ASC,id').all(normalizePlayerName(observed.playerName)) as PlayerRow[];
+        const exactMatches = nameMatches.filter((candidate) => candidate.position === observed.position && candidate.team === observed.team);
+        const named = mapped ?? (nameMatches.length === 1 ? nameMatches[0] : exactMatches.length === 1 ? exactMatches[0] : undefined);
         const rank = Math.max(1, Math.round(observed.overallRank ?? observed.adp ?? named?.overall_rank ?? 999));
         const positionalRank = Math.max(1, Math.round(observed.positionalRank ?? named?.positional_rank ?? rank));
         const reliability = clamp(94 - (rank - 1) * 0.28, 45, 94);
@@ -621,8 +731,7 @@ export class DraftRepository {
           VALUES (?,'player',?,'season:2026',?,?)`).run(source, observed.externalPlayerId, playerId, createdAt);
         upserted += 1;
       }
-      const catalogCount = (this.sqlite.prepare("SELECT COUNT(*) AS count FROM external_identities WHERE source_id=? AND namespace='player' AND scope_key='season:2026'").get(source) as { count: number }).count;
-      const activatedCatalog = catalogCount >= 30;
+      const activatedCatalog = catalogPlayerCount >= 30 && players.length >= catalogPlayerCount;
       if (activatedCatalog) this.sqlite.prepare("UPDATE players SET excluded=1 WHERE source LIKE 'Bundled demo fixture%'").run();
       return { upserted, activatedCatalog };
     })();

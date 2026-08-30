@@ -23,6 +23,7 @@ function persistentBridgeToken() {
   }
 }
 const bridgeToken = persistentBridgeToken();
+const extensionOrigin = `chrome-extension://${process.env.FDA_EXTENSION_ID ?? 'mlmmnmdaiimabiijpfmecjonchgihcke'}`;
 const repository = new DraftRepository({ databasePath: join(dataDirectory, 'app.sqlite') });
 const app = Fastify({ logger: true, disableRequestLogging: true, bodyLimit: 1_000_000, trustProxy: false });
 app.addContentTypeParser('text/plain', { parseAs: 'string' }, (_request, body, done) => done(null, body));
@@ -44,24 +45,29 @@ function health(): Health {
 app.addHook('onRequest', async (request, reply) => {
   const pathname = request.url.split('?')[0];
   const origin = request.headers.origin;
-  const extensionOrigin = typeof origin === 'string' && /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
+  const trustedExtension = origin === extensionOrigin;
+  const headerToken = request.headers['x-fourth-down-pairing-token'];
+  const suppliedHeaderToken = Array.isArray(headerToken) ? headerToken[0] : headerToken;
+  const pairedExtension = suppliedHeaderToken === bridgeToken && (trustedExtension || origin === undefined);
   if (pathname === '/v1/bridge/extension-config') {
-    if (origin && !extensionOrigin) return reply.code(403).send({ code: 'BRIDGE_REJECTED', message: 'Chrome extension origin required' });
-    reply.header('access-control-allow-origin', extensionOrigin ? origin : 'null');
+    if (!pairedExtension) return reply.code(403).send({ code: 'BRIDGE_REJECTED', message: 'Local Fourth Down pairing required' });
+    if (origin) reply.header('access-control-allow-origin', origin);
     reply.header('access-control-allow-methods', 'GET, OPTIONS');
+    reply.header('access-control-allow-headers', 'x-fourth-down-pairing-token');
     reply.header('access-control-allow-private-network', 'true');
     if (request.method === 'OPTIONS') return reply.code(204).send();
     return;
   }
   if (pathname === '/v1/bridge/observe') {
-    const allowedOrigin = origin === 'https://fantasy.espn.com' || extensionOrigin;
-    reply.header('access-control-allow-origin', allowedOrigin ? origin : 'null');
+    const queryToken = new URL(request.url, 'http://127.0.0.1').searchParams.get('token');
+    const pairedBookmarklet = origin === 'https://fantasy.espn.com' && queryToken === bridgeToken;
+    const allowed = pairedExtension || pairedBookmarklet;
+    if (origin) reply.header('access-control-allow-origin', allowed ? origin : 'null');
     reply.header('access-control-allow-methods', 'POST, OPTIONS');
-    reply.header('access-control-allow-headers', 'content-type');
+    reply.header('access-control-allow-headers', 'content-type, x-fourth-down-pairing-token');
     reply.header('access-control-allow-private-network', 'true');
     if (request.method === 'OPTIONS') return reply.code(204).send();
-    const supplied = new URL(request.url, 'http://127.0.0.1').searchParams.get('token');
-    if (!allowedOrigin || supplied !== bridgeToken) return reply.code(403).send({ code: 'BRIDGE_REJECTED', message: 'ESPN bridge origin or token rejected' });
+    if (!allowed) return reply.code(403).send({ code: 'BRIDGE_REJECTED', message: 'ESPN bridge pairing rejected' });
     return;
   }
   const host = request.headers.host?.split(':')[0];
@@ -72,7 +78,12 @@ app.addHook('onRequest', async (request, reply) => {
 
 app.setErrorHandler((error, _request, reply) => {
   const typed = error as Error & { statusCode?: number; code?: string; currentRevision?: number };
-  reply.code(typed.statusCode ?? 500).send({ code: typed.code ?? 'INTERNAL_ERROR', message: typed.message, currentRevision: typed.currentRevision });
+  const validationError = typed.name === 'ZodError';
+  reply.code(validationError ? 422 : typed.statusCode ?? 500).send({
+    code: validationError ? 'VALIDATION_ERROR' : typed.code ?? 'INTERNAL_ERROR',
+    message: validationError ? 'Request validation failed' : typed.message,
+    currentRevision: typed.currentRevision,
+  });
 });
 
 app.get('/v1/health', async () => health());

@@ -19,7 +19,9 @@ async function get(path) {
 
 function ageSeconds(value) {
   if (!value) return null;
-  return Math.max(0, (Date.now() - new Date(value).getTime()) / 1_000);
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp) || timestamp > Date.now() + 5_000) return Number.NaN;
+  return Math.max(0, (Date.now() - timestamp) / 1_000);
 }
 
 try {
@@ -38,9 +40,14 @@ try {
     if (health.espnAuth !== 'authenticated') errors.push(`ESPN authentication is ${health.espnAuth}`);
     if (health.capture !== 'healthy') errors.push(`capture is ${health.capture}`);
     if (observationAge === null) errors.push('no ESPN observation has been received');
+    else if (!Number.isFinite(observationAge)) errors.push('last ESPN observation timestamp is invalid');
     else if (observationAge > maxAgeSeconds) errors.push(`last ESPN observation is stale (${observationAge.toFixed(1)}s old)`);
-    if (state.picks.length > 0 && reconciliationAge === null) errors.push('picks exist but the board has never reconciled');
-    else if (reconciliationAge !== null && reconciliationAge > maxAgeSeconds) errors.push(`last board reconciliation is stale (${reconciliationAge.toFixed(1)}s old)`);
+    if (reconciliationAge === null) errors.push('the ESPN board has never reconciled');
+    else if (!Number.isFinite(reconciliationAge)) errors.push('last board reconciliation timestamp is invalid');
+    else if (reconciliationAge > maxAgeSeconds) errors.push(`last board reconciliation is stale (${reconciliationAge.toFixed(1)}s old)`);
+    const orderedPicks = [...state.picks].sort((left, right) => left.overallPick - right.overallPick);
+    if (!orderedPicks.every((pick, index) => pick.overallPick === index + 1)) errors.push('draft picks are not contiguous from pick 1');
+    if (state.conflicts.length > 0) errors.push(`${state.conflicts.length} unresolved reconciliation conflict${state.conflicts.length === 1 ? '' : 's'}`);
   } else if (!health.pageAttached) {
     warnings.push('ESPN is not attached; run the strict check after opening the draft tab');
   }

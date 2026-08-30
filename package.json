@@ -20,6 +20,7 @@
     "verify": "pnpm typecheck && pnpm test && pnpm lint && pnpm build",
     "app:doctor": "tsx apps/cli/src/index.ts doctor",
     "app:repair-runtime": "tsx apps/cli/src/index.ts repair-runtime",
+    "app:pair-extension": "tsx apps/cli/src/index.ts pair-extension",
     "app:backup": "tsx apps/cli/src/index.ts backup",
     "app:import": "tsx apps/cli/src/index.ts import-research",
     "app:enrich": "tsx apps/cli/src/index.ts import-intelligence",
@@ -29,6 +30,7 @@
     "app:status": "./scripts/validate-connections.sh",
     "app:status:espn": "./scripts/validate-connections.sh --require-espn",
     "app:validate:visual": "node ./scripts/visual-validate.mjs",
+    "app:validate:red-team-ui": "tsx ./scripts/red-team-ui.mts",
     "app:teardown": "./scripts/teardown.sh"
   },
   "devDependencies": {
